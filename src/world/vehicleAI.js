@@ -1,5 +1,9 @@
 // Vehicle "drivers": perception (can they see the drone?) and natural driving
-// (speed/turn limits), with evasive manoeuvres once the drone is spotted.
+// (speed/turn limits). Once the drone is spotted they plan a path on the drivability grid to a
+// far destination or to cover, drive all of it (reversing / three-point turns when needed),
+// and never through trees or buildings.
+
+import { isSolidForVehicles } from './colliders.js';
 
 const DEG = Math.PI / 180;
 const AI_TICK = 0.1; // s, perception + decisions at 10 Hz; driving integrates every frame
@@ -24,15 +28,20 @@ const VISION = {
   tank: { height: 2.0, halfFov: 35, elevMax: 20, range: 180, detectTime: 2.5, memory: 8 },
 };
 
-// Reaction: delay before acting once spotted, engine start for parked vehicles,
-// how often a new manoeuvre is chosen, and manoeuvre weights.
+// Reaction: delay before acting once spotted, engine start for parked vehicles, what they do
+// (flee far away vs drive to cover), and how often light vehicles throw in a sudden brake/swerve.
 const BEHAVIOR = {
-  car: { reaction: 0.5, startup: 1.2, decide: [1.2, 3], weights: { dash: 0.35, brake: 0.25, swerve: 0.3, cover: 0.1 } },
-  truck: { reaction: 0.9, startup: 2.5, decide: [2, 4], weights: { dash: 0.3, brake: 0.2, swerve: 0.2, cover: 0.3 } },
-  apc: { reaction: 1.0, startup: 2.5, decide: [2, 4.5], weights: { dash: 0.3, brake: 0.2, swerve: 0.2, cover: 0.3 } },
-  ifv: { reaction: 1.1, startup: 3, decide: [2, 5], weights: { dash: 0.25, brake: 0.2, swerve: 0.2, cover: 0.35 } },
-  tank: { reaction: 1.5, startup: 4.5, decide: [3, 6], weights: { dash: 0.2, brake: 0.2, swerve: 0.2, cover: 0.4 } },
+  car: { reaction: 0.5, startup: 1.2, goals: { flee: 0.7, cover: 0.3 }, jink: 0.5 },
+  truck: { reaction: 0.9, startup: 2.5, goals: { flee: 0.55, cover: 0.45 }, jink: 0.3 },
+  apc: { reaction: 1.0, startup: 2.5, goals: { flee: 0.55, cover: 0.45 }, jink: 0.25 },
+  ifv: { reaction: 1.1, startup: 3, goals: { flee: 0.5, cover: 0.5 }, jink: 0.2 },
+  tank: { reaction: 1.5, startup: 4.5, goals: { flee: 0.45, cover: 0.55 }, jink: 0.1 },
 };
+const REVERSE_SPEED = 3.5; // m/s
+const ARRIVE = 7; // m from the destination counts as arrived
+const FLEE = [220, 480]; // m, how far a fleeing vehicle goes in one leg
+const COVER = [60, 450]; // m, cover points considered
+const HIDE_RECOVER = [20, 40]; // s hidden before a patrolling vehicle goes back to its route
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -72,7 +81,8 @@ function closestOnRoute(route, x, z, s0 = 0, s1 = route.total) {
   return { s: bestS, dist: Math.sqrt(best) };
 }
 
-export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints, half }) {
+// nav: drivability grid + planner (navGrid.js), shared by all vehicles
+export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints, half, nav }) {
   const bound = half - 60;
   const drive = DRIVE[v.type];
   const vision = VISION[v.type];
@@ -81,7 +91,7 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
   const probe = { x: 0, y: 0, z: 0 };
 
   const d = {
-    mode: 'idle', // 'patrol' | 'parked' | 'react' | 'startup' | 'evade' | 'recover' | 'hold' | 'dead'
+    mode: 'idle', // 'patrol' | 'parked' | 'react' | 'startup' | 'evade' | 'hide' | 'recover' | 'dead'
     timer: 0,
     tick: Math.random() * AI_TICK,
     awareness: 0,
@@ -91,12 +101,17 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     seeing: false,
     knownX: 0,
     knownZ: 0,
-    maneuver: null,
-    maneuverTimer: 0,
-    maneuverYaw: 0,
-    cover: null,
-    avoidYaw: 0,
-    avoidTimer: 0,
+    goal: null, // 'flee' | 'cover' | 'route'
+    path: null, // [[x, z], ...] planned waypoints
+    pathIdx: 0,
+    jink: null, // { kind: 'brake' | 'swerve', timer, side }
+    jinkTimer: 0,
+    reverse: 0, // s left of backing straight away from an obstacle
+    turnPhase: 0, // three-point turn: -1 backing up, +1 pulling forward (both steer towards the target)
+    turnTimer: 0,
+    reverses: { turn: 0, obstacle: 0, stuck: 0 }, // why it backed up (debug stats)
+    planWait: 0, // s until the next planning attempt after a failure
+    planFails: 0,
     stuckTimer: 0,
     time: 0,
     desiredYaw: 0,
@@ -105,8 +120,8 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
 
   function reset(home) {
     Object.assign(d, {
-      awareness: 0, aware: false, lastSeen: -Infinity, seeing: false, maneuver: null,
-      avoidTimer: 0, stuckTimer: 0, timer: 0, cover: null,
+      awareness: 0, aware: false, lastSeen: -Infinity, seeing: false, goal: null, path: null, jink: null,
+      reverse: 0, turnPhase: 0, planWait: 0, bumps: 0, boxedUntil: 0, planFails: 0, stuckTimer: 0, timer: 0,
     });
     v.speed = 0;
     v.yawRate = 0;
@@ -128,7 +143,6 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     d.desiredYaw = v.yaw;
     d.targetSpeed = v.speed;
   }
-
   // ---------- perception ----------
 
   // Fine steps near the vehicle (berms, pit edges are only a few metres wide), coarser further out
@@ -190,32 +204,269 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
 
   // ---------- decisions ----------
 
-  function nearestCover() {
-    let best = null;
-    let bestD = Infinity;
-    for (const c of coverPoints) {
-      const dd = (c[0] - v.x) ** 2 + (c[1] - v.z) ** 2;
-      // prefer cover that isn't toward the drone
-      const toward = (c[0] - v.x) * (d.knownX - v.x) + (c[1] - v.z) * (d.knownZ - v.z) > 0 ? 3 : 1;
-      if (dd * toward < bestD) {
-        bestD = dd * toward;
-        best = c;
+  // A destination: flee far away from the drone (roads preferred), or reach cover (tree line /
+  // forest edge) that isn't towards it. Plans a path; null when no plan budget this frame.
+  function chooseGoal(kind) {
+    if (nav.budget <= 0) return false;
+    const away = yawTo(v.x - d.knownX, v.z - d.knownZ);
+    const candidates = [];
+    if (kind === 'cover') {
+      for (const c of coverPoints) {
+        const dist = Math.hypot(c[0] - v.x, c[1] - v.z);
+        if (dist < COVER[0] || dist > COVER[1]) continue;
+        const toward = ((c[0] - v.x) * (d.knownX - v.x) + (c[1] - v.z) * (d.knownZ - v.z)) / (dist * (Math.hypot(d.knownX - v.x, d.knownZ - v.z) || 1));
+        candidates.push({ x: c[0], z: c[1], score: -dist * (1 + Math.max(0, toward) * 3) });
+      }
+    } else {
+      for (let k = 0; k < 12; k++) {
+        const a = away + rand(-0.9, 0.9);
+        const dist = rand(...FLEE);
+        const x = v.x - Math.sin(a) * dist;
+        const z = v.z - Math.cos(a) * dist;
+        if (Math.abs(x) > bound || Math.abs(z) > bound || !nav.freeAt(x, z)) continue;
+        candidates.push({ x, z, score: Math.hypot(x - d.knownX, z - d.knownZ) + (nav.isRoad(x, z) ? 80 : 0) });
+      }
+      if (v.moving) {
+        // along its own road, whichever way leads away
+        for (const ds of [-320, 320]) {
+          sampleRoute(v.route, clamp(v.s + ds, 0, v.route.total), sample);
+          candidates.push({ x: sample.x, z: sample.z, score: Math.hypot(sample.x - d.knownX, sample.z - d.knownZ) + 150 });
+        }
       }
     }
-    return best;
+    candidates.sort((a, b) => b.score - a.score);
+    for (const c of candidates.slice(0, 2)) {
+      nav.budget--;
+      const path = nav.plan(v.x, v.z, c.x, c.z, v.yaw);
+      if (path) {
+        d.goal = kind;
+        d.path = path;
+        d.pathIdx = 1;
+        return true;
+      }
+      if (nav.budget <= 0) break;
+    }
+    if (kind === 'cover' && candidates.length === 0) return chooseGoal('flee');
+    return false;
   }
 
-  function chooseManeuver() {
-    d.maneuver = pick(behavior.weights);
-    d.maneuverTimer = rand(...behavior.decide);
-    const away = yawTo(v.x - d.knownX, v.z - d.knownZ);
-    if (d.maneuver === 'dash') d.maneuverYaw = away + rand(-0.6, 0.6);
-    if (d.maneuver === 'swerve') d.maneuverYaw = v.yaw + (Math.random() < 0.5 ? -1 : 1) * rand(60, 120) * DEG;
-    if (d.maneuver === 'brake') d.maneuverTimer = rand(1, 2.5);
-    if (d.maneuver === 'cover') {
-      d.cover = nearestCover();
-      d.maneuverTimer *= 2;
+  // Path back to the route; ahead > 0: to a point that far along it (detour around a blockage)
+  function planToRoute(...aheads) {
+    if (nav.budget <= 0) return false;
+    nav.budget--;
+    const near = closestOnRoute(v.route, v.x, v.z);
+    let path = null;
+    for (const ahead of aheads.length ? aheads : [0]) {
+      sampleRoute(v.route, clamp(near.s + ahead * v.dir, 0, v.route.total), sample);
+      path = nav.plan(v.x, v.z, sample.x, sample.z, v.yaw);
+      if (path) break;
     }
+    if (!path) return false;
+    d.goal = 'route';
+    d.path = path;
+    d.pathIdx = 1;
+    return true;
+  }
+
+  // Pure pursuit on the planned path: steer at the point `look` metres further along the path
+  // from the vehicle's projection on it (no corner cutting). Returns { left, bend } where bend is
+  // the heading change at the next waypoint, used to slow down before it.
+  const follow = { left: 0, bend: 0, toBend: 0 };
+  function followPath() {
+    const path = d.path;
+    if (path.length < 2) {
+      follow.left = follow.bend = follow.toBend = 0; // already there
+      return follow;
+    }
+    // advance along segments while the vehicle has passed their end
+    for (;;) {
+      if (d.pathIdx >= path.length - 1) break;
+      const [ax, az] = path[d.pathIdx - 1];
+      const [bx, bz] = path[d.pathIdx];
+      const ex = bx - ax;
+      const ez = bz - az;
+      if (((v.x - ax) * ex + (v.z - az) * ez) / (ex * ex + ez * ez || 1) < 1) break;
+      d.pathIdx++;
+    }
+    const [ax, az] = path[d.pathIdx - 1];
+    const [bx, bz] = path[d.pathIdx];
+    const ex = bx - ax;
+    const ez = bz - az;
+    const segLen = Math.hypot(ex, ez) || 1;
+    const t = clamp(((v.x - ax) * ex + (v.z - az) * ez) / (segLen * segLen), 0, 1);
+    // walk `look` metres along the path from the projection
+    let look = 4 + Math.abs(v.speed) * 0.45;
+    let i = d.pathIdx;
+    let px = ax + ex * t;
+    let pz = az + ez * t;
+    let tx = px;
+    let tz = pz;
+    for (;;) {
+      const [qx, qz] = path[i];
+      const seg = Math.hypot(qx - px, qz - pz);
+      if (seg >= look || i === path.length - 1) {
+        const f = seg > 1e-6 ? Math.min(1, look / seg) : 0;
+        tx = px + (qx - px) * f;
+        tz = pz + (qz - pz) * f;
+        break;
+      }
+      look -= seg;
+      px = qx;
+      pz = qz;
+      i++;
+    }
+    // light vehicles weave and swerve on open ground
+    const weave = v.type === 'car' && d.goal === 'flee' ? Math.sin(d.time * 1.3) * 3 : 0;
+    const side = (d.jink?.kind === 'swerve' ? d.jink.side * 6 : 0) + weave;
+    if (side) {
+      const ox = tx + (-ez / segLen) * side;
+      const oz = tz + (ex / segLen) * side;
+      if (nav.freeAt(ox, oz)) {
+        tx = ox;
+        tz = oz;
+      }
+    }
+    d.desiredYaw = yawTo(tx - v.x, tz - v.z);
+    // remaining distance and the next bend
+    let left = Math.hypot(bx - v.x, bz - v.z);
+    for (let k = d.pathIdx + 1; k < path.length; k++) left += Math.hypot(path[k][0] - path[k - 1][0], path[k][1] - path[k - 1][1]);
+    follow.left = left;
+    follow.toBend = Math.hypot(bx - v.x, bz - v.z);
+    follow.bend = d.pathIdx < path.length - 1
+      ? Math.abs(wrap(yawTo(path[d.pathIdx + 1][0] - bx, path[d.pathIdx + 1][1] - bz) - yawTo(ex, ez)))
+      : 0;
+    return follow;
+  }
+
+  function maybeJink(dt) {
+    if (d.jink) {
+      d.jink.timer -= dt;
+      if (d.jink.timer <= 0) d.jink = null;
+      return;
+    }
+    d.jinkTimer -= dt;
+    if (d.jinkTimer > 0) return;
+    d.jinkTimer = rand(3, 7);
+    if (!d.aware || Math.random() > behavior.jink) return;
+    d.jink = Math.random() < 0.45
+      ? { kind: 'brake', timer: rand(0.8, 1.6) } // stop dead so the drone overshoots
+      : { kind: 'swerve', timer: rand(1.5, 2.5), side: Math.random() < 0.5 ? -1 : 1 };
+  }
+
+  // Drive the current path; three-point turn / reverse when the next point is behind
+  function drivePath(dt, speed) {
+    const { left, bend, toBend } = followPath();
+    // brake for the end of the path and for sharp bends ahead (corner speed ~ sqrt(radius * 3 m/s²))
+    const cornerSpeed = bend > 0.35 ? Math.max(3, Math.sqrt(3 * drive.turnRadius * 2 / Math.max(0.35, bend))) : speed;
+    const brakeTo = (vEnd, dist) => Math.sqrt(vEnd * vEnd + 2 * drive.brake * 0.7 * Math.max(0, dist));
+    d.targetSpeed = Math.min(speed, brakeTo(1, left - ARRIVE * 0.5), brakeTo(cornerSpeed, toBend - 3));
+    if (d.jink?.kind === 'brake') d.targetSpeed = 0;
+    threePointTurn(dt);
+    return left;
+  }
+
+  // Wheeled vehicles facing away from where they must go: back up and pull forward, steering
+  // round each time, until they face it (tracked ones just pivot)
+  function threePointTurn(dt) {
+    const err = wrap(d.desiredYaw - v.yaw);
+    if (!drive.pivot && !d.turnPhase && d.reverse <= 0 && Math.abs(err) > 1.9 && Math.abs(v.speed) < 3) {
+      d.turnPhase = -1;
+      d.turnTimer = rand(2, 3);
+      d.reverses.turn++;
+    }
+    if (!d.turnPhase) return;
+    if (Math.abs(err) < 0.9) {
+      d.turnPhase = 0;
+      return;
+    }
+    d.turnTimer -= dt;
+    if (d.turnTimer <= 0) {
+      d.turnPhase = -d.turnPhase;
+      d.turnTimer = rand(2, 3);
+    }
+    d.targetSpeed = d.turnPhase * REVERSE_SPEED;
+  }
+
+  function decide(dt) {
+    d.timer -= dt;
+    switch (d.mode) {
+      case 'patrol':
+        d.desiredYaw = patrolTarget();
+        d.targetSpeed = v.patrolSpeed;
+        threePointTurn(dt); // end of the road
+        if (d.aware) { d.mode = 'react'; d.timer = behavior.reaction; }
+        else if (d.blockedOnRoute && nav.budget > 0) {
+          // drive round it; if there's no way round, turn back
+          if (planToRoute(40, 90)) d.mode = 'recover';
+          else v.dir = -v.dir;
+          d.blockedOnRoute = false;
+        }
+        break;
+      case 'parked':
+        d.targetSpeed = 0;
+        if (d.aware) { d.mode = 'startup'; d.timer = behavior.reaction + behavior.startup; }
+        break;
+      case 'react':
+      case 'startup':
+        if (d.timer <= 0) { d.mode = 'evade'; d.path = null; }
+        break;
+      case 'evade': {
+        d.planWait -= dt;
+        if (!d.path) {
+          if (d.planWait > 0 || nav.budget <= 0) {
+            d.targetSpeed = Math.min(d.targetSpeed, 2); // waiting for a plan: creep
+            break;
+          }
+          if (!chooseGoal(pick(behavior.goals))) {
+            d.planWait = 1.5;
+            if (++d.planFails >= 4) { d.mode = 'hide'; d.timer = rand(...HIDE_RECOVER); d.planFails = 0; d.boxedUntil = d.time + rand(10, 20); }
+            d.targetSpeed = 0;
+            break;
+          }
+          d.planFails = 0;
+        }
+        maybeJink(dt);
+        const left = drivePath(dt, drive.maxSpeed * (d.goal === 'cover' ? 0.85 : 1));
+        if (left < ARRIVE) {
+          d.path = null;
+          // still being watched: keep going; otherwise stay hidden here
+          if (!(d.aware && d.time - d.lastSeen < 3)) {
+            d.mode = 'hide';
+            d.timer = rand(...HIDE_RECOVER);
+            d.targetSpeed = 0;
+          }
+        }
+        break;
+      }
+      case 'hide':
+        d.targetSpeed = 0;
+        if (d.aware && d.time - d.lastSeen < 1 && d.time > (d.boxedUntil ?? 0)) { d.mode = 'evade'; d.path = null; }
+        else if (v.moving && d.timer <= 0 && !d.aware) { d.mode = 'recover'; d.path = null; }
+        break;
+      case 'recover': {
+        if (d.aware) { d.mode = 'evade'; d.path = null; break; }
+        d.planWait -= dt;
+        if (!d.path && (d.planWait > 0 || !planToRoute())) {
+          if (d.planWait <= 0) d.planWait = 2;
+          d.targetSpeed = 0;
+          break;
+        }
+        const left = drivePath(dt, Math.min(v.patrolSpeed * 1.3, drive.maxSpeed));
+        if (left < ARRIVE) {
+          d.path = null;
+          v.s = closestOnRoute(v.route, v.x, v.z).s;
+          d.mode = 'patrol';
+        }
+        break;
+      }
+    }
+    if (d.reverse > 0) {
+      d.reverse -= dt;
+      d.turnPhase = 0;
+      d.targetSpeed = -REVERSE_SPEED;
+      d.desiredYaw = v.yaw; // straight back
+    }
+    if (d.mode !== 'evade' && d.mode !== 'recover' && d.mode !== 'patrol') d.turnPhase = 0;
   }
 
   function patrolTarget() {
@@ -228,97 +479,20 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     return yawTo(sample.x - v.x, sample.z - v.z);
   }
 
-  function decide(dt) {
-    d.timer -= dt;
-    switch (d.mode) {
-      case 'patrol':
-        d.desiredYaw = patrolTarget();
-        d.targetSpeed = v.patrolSpeed;
-        if (d.aware) { d.mode = 'react'; d.timer = behavior.reaction; }
-        break;
-      case 'parked':
-        d.targetSpeed = 0;
-        if (d.aware) { d.mode = 'startup'; d.timer = behavior.reaction + behavior.startup; }
-        break;
-      case 'react':
-      case 'startup':
-        if (d.timer <= 0) { d.mode = 'evade'; chooseManeuver(); }
-        break;
-      case 'evade': {
-        if (!d.aware) { d.mode = v.moving ? 'recover' : 'hold'; break; }
-        d.maneuverTimer -= dt;
-        if (d.maneuverTimer <= 0) chooseManeuver();
-        const away = yawTo(v.x - d.knownX, v.z - d.knownZ);
-        if (d.maneuver === 'dash') {
-          const weave = v.type === 'car' ? Math.sin(d.time * 1.7) * 0.35 : 0;
-          d.desiredYaw = d.maneuverYaw + weave;
-          d.targetSpeed = drive.maxSpeed;
-          d.maneuverYaw += wrap(away - d.maneuverYaw) * dt * 0.3; // keep drifting away from the drone
-        } else if (d.maneuver === 'brake') {
-          d.targetSpeed = 0;
-        } else if (d.maneuver === 'swerve') {
-          d.desiredYaw = d.maneuverYaw;
-          d.targetSpeed = drive.maxSpeed * 0.8;
-        } else if (d.maneuver === 'cover' && d.cover) {
-          const dx = d.cover[0] - v.x;
-          const dz = d.cover[1] - v.z;
-          d.desiredYaw = yawTo(dx, dz);
-          d.targetSpeed = Math.hypot(dx, dz) < 8 ? 0 : drive.maxSpeed;
-        }
-        break;
-      }
-      case 'recover': {
-        if (d.aware) { d.mode = 'evade'; chooseManeuver(); break; }
-        const near = closestOnRoute(v.route, v.x, v.z);
-        if (near.dist < 6) {
-          v.s = near.s;
-          d.mode = 'patrol';
-          break;
-        }
-        sampleRoute(v.route, near.s, sample);
-        d.desiredYaw = yawTo(sample.x - v.x, sample.z - v.z);
-        d.targetSpeed = Math.min(v.patrolSpeed * 1.5, drive.maxSpeed);
-        break;
-      }
-      case 'hold':
-        d.targetSpeed = 0;
-        if (d.aware) { d.mode = 'evade'; chooseManeuver(); }
-        break;
+  // Hull footprint at a pose overlaps something solid (trunk, wall, log, wreck)? Three spheres
+  // along the body, from the rear to just past the nose.
+  function overlaps(x, z, yaw) {
+    const sx = -Math.sin(yaw);
+    const sz = -Math.cos(yaw);
+    const r = v.half.x * 0.8;
+    for (const f of [-0.6, 0, 0.75]) {
+      probe.x = x + sx * v.half.z * f;
+      probe.z = z + sz * v.half.z * f;
+      if (Math.abs(probe.x) > half - 5 || Math.abs(probe.z) > half - 5) return true; // map edge
+      probe.y = heightAt(probe.x, probe.z) + 0.8;
+      if (colliders.hits(probe, r, isSolidForVehicles)) return true;
     }
-    avoidObstacles(dt);
-  }
-
-  // Look ahead for trunks, buildings, map edge; steer to the first clear heading.
-  function blocked(yaw, dist) {
-    probe.x = v.x - Math.sin(yaw) * dist;
-    probe.z = v.z - Math.cos(yaw) * dist;
-    if (Math.abs(probe.x) > bound || Math.abs(probe.z) > bound) return true;
-    probe.y = heightAt(probe.x, probe.z) + 1.2;
-    return !!colliders.hits(probe, v.half.x + 0.5);
-  }
-
-  function avoidObstacles(dt) {
-    if (d.targetSpeed < 0.5) return;
-    d.avoidTimer -= dt;
-    if (d.avoidTimer > 0) {
-      d.desiredYaw = d.avoidYaw;
-      return;
-    }
-    const dist = v.half.z + 3 + Math.abs(v.speed) * 1.2;
-    if (!blocked(d.desiredYaw, dist) && !blocked(d.desiredYaw, dist * 0.5)) return;
-    const side = Math.random() < 0.5 ? 1 : -1;
-    for (const off of [0.4, 0.8, 1.2, 1.6, 2.2]) {
-      for (const sgn of [side, -side]) {
-        const yaw = d.desiredYaw + sgn * off;
-        if (!blocked(yaw, dist) && !blocked(yaw, dist * 0.5)) {
-          d.avoidYaw = yaw;
-          d.avoidTimer = 1;
-          d.desiredYaw = yaw;
-          return;
-        }
-      }
-    }
-    d.targetSpeed = 0; // boxed in
+    return false;
   }
 
   // ---------- driving ----------
@@ -330,25 +504,63 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     const wantRate = clamp(err * 2, -maxRate, maxRate);
     v.yawRate += clamp(wantRate - v.yawRate, -drive.yawAccel * dt, drive.yawAccel * dt);
     if (!drive.pivot && speedAbs < 0.1) v.yawRate = 0;
-    v.yaw = wrap(v.yaw + v.yawRate * dt);
+    const oldYaw = v.yaw;
+    const newYaw = wrap(v.yaw + v.yawRate * dt);
 
-    // Slow down for sharp turns (tanks nearly stop to pivot)
+    // Slow down for sharp turns (tanks nearly stop to pivot); reversing is slow anyway
     const turn = Math.abs(err);
     let target = d.targetSpeed;
-    if (turn > 0.3) target *= drive.pivot ? clamp(1 - turn, 0.1, 1) : clamp(1.2 - turn * 0.6, 0.35, 1);
+    if (target > 0 && turn > 0.3 && !d.turnPhase) target *= drive.pivot ? clamp(1 - turn, 0.1, 1) : clamp(1.2 - turn * 0.6, 0.35, 1);
     if (v.state === 'damaged') target *= 0.6;
     v.speed += clamp(target - v.speed, -drive.brake * dt, drive.accel * dt);
 
-    v.x -= Math.sin(v.yaw) * v.speed * dt;
-    v.z -= Math.cos(v.yaw) * v.speed * dt;
+    // Never drive or turn into solid things: refuse the move, then back away (or go forward if
+    // the rear is what's blocked). Moves out of an existing overlap are allowed.
+    const nx = v.x - Math.sin(newYaw) * v.speed * dt;
+    const nz = v.z - Math.cos(newYaw) * v.speed * dt;
+    if ((nx !== v.x || nz !== v.z || newYaw !== oldYaw) && overlaps(nx, nz, newYaw) && !overlaps(v.x, v.z, oldYaw)) {
+      const sign = Math.sign(v.speed);
+      v.speed = 0;
+      v.yawRate = 0;
+      if (d.turnPhase) {
+        d.turnPhase = sign < 0 ? 1 : -1; // blocked mid-turn: go the other way
+        d.turnTimer = rand(2, 3);
+        return;
+      }
+      if (d.mode === 'patrol') d.blockedOnRoute = true;
+      if (sign >= 0 && d.reverse <= 0 && d.mode !== 'parked') {
+        d.reverses.obstacle++;
+        d.reverse = rand(1, 1.6);
+        d.path = null; // replan from the new spot
+        // boxed in (brush, ravine floor): give up for a while
+        d.bumps = (d.bumps ?? 0) * Math.exp(-(d.time - (d.lastBump ?? 0)) / 30) + 1;
+        d.lastBump = d.time;
+        if (d.bumps > 6 && d.mode !== 'evade' && v.moving) {
+          v.dir = -v.dir; // wedged on the way back to the road: try the other way
+          d.mode = 'recover';
+          d.bumps = 0;
+        } else if (d.bumps > 6 && d.mode === 'evade') {
+          d.mode = 'hide';
+          d.timer = rand(...HIDE_RECOVER);
+          d.boxedUntil = d.time + rand(15, 30); // stuck in brush: the crew sits it out
+          d.reverse = 0;
+          d.bumps = 0;
+        }
+      } else if (sign < 0) d.reverse = 0;
+      return;
+    }
+    v.yaw = newYaw;
+    v.x = nx;
+    v.z = nz;
 
-    // Stuck: wants to move but isn't (e.g. wedged among trees) -> pick a new heading
-    if (d.targetSpeed > 2 && speedAbs < 0.5) d.stuckTimer += dt;
+    // Stuck: wants to move but can't for a while -> back off and replan
+    if (Math.abs(d.targetSpeed) > 2 && speedAbs < 0.3) d.stuckTimer += dt;
     else d.stuckTimer = 0;
     if (d.stuckTimer > 3) {
       d.stuckTimer = 0;
-      d.avoidYaw = v.yaw + Math.PI + rand(-0.8, 0.8);
-      d.avoidTimer = 2;
+      d.reverses.stuck++;
+      d.reverse = rand(1.5, 2.5);
+      d.path = null;
     }
   }
 

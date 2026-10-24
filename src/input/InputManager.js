@@ -11,8 +11,8 @@ export class InputManager {
     this.gamepad = null;
     this.raw = NO_AXES;
     this.buttons = NO_AXES;
-    // arm/reset: boolean, or null when the switch is not mapped
-    this.state = { connected: false, roll: 0, pitch: 0, yaw: 0, throttle: 0, arm: null, reset: null };
+    // switches: boolean, or null when not mapped
+    this.state = { connected: false, roll: 0, pitch: 0, yaw: 0, throttle: 0, ...Object.fromEntries(SWITCHES.map((sw) => [sw, null])) };
   }
 
   update() {
@@ -24,7 +24,7 @@ export class InputManager {
       this.buttons = NO_AXES;
       s.connected = false;
       s.roll = s.pitch = s.yaw = s.throttle = 0;
-      s.arm = s.reset = null;
+      for (const sw of SWITCHES) s[sw] = null;
       return;
     }
     this.raw = gp.axes;

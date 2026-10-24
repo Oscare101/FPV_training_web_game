@@ -29,7 +29,15 @@ export const MAP_DEFAULTS = {
   ravines: 2, // winding gullies ("balka")
   revetments: 0.6, // chance a parked vehicle is dug in behind an earth berm
   launchSpot: 'random', // 'random' | one of LAUNCH_SPOTS
+  season: 'summer', // 'spring' | 'summer' | 'autumn' | 'winter': ground, foliage, snow, ice
+  rivers: 1,
+  lakes: 1,
+  burned: 0.5, // burnt land patches (charred trees, black ground), scales their number
+  fallenTrees: 1, // density multiplier
+  whitewash: 0.35, // winter: share of vehicles with improvised white paint
 };
+
+export const SEASONS = ['spring', 'summer', 'autumn', 'winter'];
 
 export const LAUNCH_SPOTS = ['field', 'treeline', 'forest', 'ravine', 'ruins', 'track'];
 
@@ -43,6 +51,19 @@ const CROPS = {
   fallow: [0.43, 0.44, 0.3],
 };
 const CROP_NAMES = Object.keys(CROPS);
+// Which crops the fields show in each season (weights)
+const SEASON_CROPS = {
+  spring: { plowed: 0.35, green: 0.4, fallow: 0.25 },
+  summer: { stubble: 1, wheat: 1, plowed: 1, green: 1, sunflower: 1, fallow: 1 },
+  autumn: { stubble: 0.35, plowed: 0.35, fallow: 0.2, sunflower: 0.1 },
+  winter: { plowed: 0.4, stubble: 0.3, fallow: 0.3 },
+};
+// Field/grass colour shift per season: mix target and weight
+const SEASON_TINT = { spring: [[0.34, 0.45, 0.23], 0.35], summer: [null, 0], autumn: [[0.5, 0.41, 0.26], 0.4], winter: [null, 0] };
+const SNOW = [0.68, 0.7, 0.74];
+const CHAR = [0.07, 0.065, 0.06];
+const ASH = [0.4, 0.39, 0.37];
+const RIVERBED = [0.24, 0.23, 0.19];
 // Tree species mixes by place (see vegetation.js SPECIES), and their height ranges
 const TREE_MIX = {
   treeline: { acacia: 0.28, poplar: 0.2, oak: 0.2, birch: 0.14, spruce: 0.08, fruit: 0.04, willow: 0.06 },
@@ -54,7 +75,7 @@ const TREE_MIX = {
   cover: { oak: 0.6, acacia: 0.25, willow: 0.15 },
 };
 const TREE_HEIGHT = {
-  spruce: [12, 22], pine: [14, 22], oak: [10, 16], birch: [10, 16], poplar: [14, 22], acacia: [8, 13], willow: [8, 12], fruit: [4, 7], dead: [4, 11],
+  spruce: [12, 22], pine: [14, 22], oak: [10, 16], birch: [10, 16], poplar: [14, 22], acacia: [8, 13], willow: [8, 12], fruit: [4, 7], dead: [4, 11], burnt: [6, 15],
 };
 // Grass per crop: [density 0..1, height m]
 const CROP_GRASS = {
@@ -189,11 +210,20 @@ export function generateLayout(seed, options = {}) {
     }
     return lo;
   };
+  const season = SEASON_CROPS[o.season] ? o.season : 'summer';
+  const winter = season === 'winter';
+  const cropWeights = SEASON_CROPS[season];
+  const cropTotal = Object.values(cropWeights).reduce((a, b) => a + b, 0);
   const cropOf = new Map();
   const fieldCrop = (x, z) => {
     const [u, w] = toGrid(x, z);
     const id = bisect(uLines, u) * 1000 + bisect(wLines, w);
-    if (!cropOf.has(id)) cropOf.set(id, CROP_NAMES[Math.floor(mulberry32(seed + id)() * CROP_NAMES.length)]);
+    if (!cropOf.has(id)) {
+      let t = mulberry32(seed + id)() * cropTotal;
+      let crop = 'fallow';
+      for (const [k, v] of Object.entries(cropWeights)) if ((t -= v) <= 0) { crop = k; break; }
+      cropOf.set(id, crop);
+    }
     return cropOf.get(id);
   };
 
@@ -364,13 +394,131 @@ export function generateLayout(seed, options = {}) {
   for (let i = 0; i < Math.round(o.hilliness * 30 * area); i++) bumps.push({ x: r(-half, half), z: r(-half, half), r: r(25, 70), h: r(2, 7) });
   for (let i = 0; i < Math.round(o.hilliness * 10 * area); i++) bumps.push({ x: r(-half, half), z: r(-half, half), r: r(60, 160), h: -r(1.5, 4) });
 
+  // ---------- rivers and lakes ----------
+  // A river meanders across the map preferring low ground; lakes sit in open land. Positions only
+  // here (so the launch, houses and enemy sites avoid them); carved into the terrain further down.
+  const waterMask = createRaster(size, RC); // 2 water, 1 bank (nothing built here)
+  const roughHeight = (x, z) => {
+    let h = 14 * fbm(x / 700, z / 700, 3) + 3.2 * o.hilliness * fbm(x / 170 + 9, z / 170 - 4, 3);
+    for (const b of bumps) h += b.h * Math.exp(-((x - b.x) ** 2 + (z - b.z) ** 2) / (b.r * b.r));
+    return h;
+  };
+  const rivers = []; // { pts, width, levels }
+  for (let k = 0; k < Math.round(o.rivers); k++) {
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const vertical = chance(0.5);
+      let x = vertical ? r(-half * 0.7, half * 0.7) : -half;
+      let z = vertical ? -half : r(-half * 0.7, half * 0.7);
+      const base = vertical ? Math.PI / 2 : 0;
+      let heading = base;
+      const pts = [];
+      while (Math.abs(x) <= half && Math.abs(z) <= half && pts.length < 600) {
+        pts.push([x, z]);
+        // pick the lowest of a few headings ahead, with some randomness
+        let best = heading;
+        let bestH = Infinity;
+        for (const dh of [-0.25, 0, 0.25]) {
+          const hh = base + Math.max(-0.75, Math.min(0.75, heading + dh + r(-0.08, 0.08) - base));
+          const v = roughHeight(x + Math.cos(hh) * 40, z + Math.sin(hh) * 40) + r(0, 1.2);
+          if (v < bestH) {
+            bestH = v;
+            best = hh;
+          }
+        }
+        heading = best;
+        x += Math.cos(heading) * 10;
+        z += Math.sin(heading) * 10;
+      }
+      const tooClose = pts.some(([px, pz]) => Math.hypot(px - launchRef.x, pz - launchRef.z) < 140 || Math.hypot(px - enemyCenter.x, pz - enemyCenter.z) < 90
+        || Math.hypot(px - villageCenter.x, pz - villageCenter.z) < 70);
+      if (tooClose && attempt < 7) continue;
+      if (tooClose) break;
+      const width = r(10, 22);
+      rivers.push({ pts, width });
+      for (let i = 1; i < pts.length; i++) {
+        waterMask.stampLine(...pts[i - 1], ...pts[i], width / 2 + 12, 1);
+        waterMask.stampLine(...pts[i - 1], ...pts[i], width / 2 + 1, 2);
+      }
+      break;
+    }
+  }
+  const lakes = []; // { x, z, R, radii[LAKE_SEG], level }
+  const LAKE_SEG = 48;
+  const lakeRadius = (l, x, z) => {
+    let a = Math.atan2(z - l.z, x - l.x);
+    if (a < 0) a += Math.PI * 2;
+    const f = (a / (Math.PI * 2)) * LAKE_SEG;
+    const i = Math.floor(f) % LAKE_SEG;
+    const t = f - Math.floor(f);
+    return l.radii[i] * (1 - t) + l.radii[(i + 1) % LAKE_SEG] * t;
+  };
+  for (let k = 0; k < Math.round(o.lakes); k++) {
+    for (let attempt = 0; attempt < 40; attempt++) {
+      const R = r(28, 75);
+      const x = r(-half + R + 120, half - R - 120);
+      const z = r(-half + R + 120, half - R - 120);
+      if (Math.hypot(x - launchRef.x, z - launchRef.z) < R + 150 || Math.hypot(x - enemyCenter.x, z - enemyCenter.z) < R + 110) continue;
+      if (Math.hypot(x - villageCenter.x, z - villageCenter.z) < R + 90 || lakes.some((l) => Math.hypot(l.x - x, l.z - z) < l.R + R + 60)) continue;
+      let wetTaken = false;
+      for (let a = 0; a < 16 && !wetTaken; a++) {
+        for (const f of [0.3, 0.7, 1.1]) {
+          const px = x + Math.cos((a / 16) * Math.PI * 2) * R * f;
+          const pz = z + Math.sin((a / 16) * Math.PI * 2) * R * f;
+          if (roadMask.get(px, pz) === 2 || waterMask.get(px, pz)) wetTaken = true;
+        }
+      }
+      if (wetTaken) continue;
+      const p1 = r(0, 6);
+      const p2 = r(0, 6);
+      const radii = Array.from({ length: LAKE_SEG }, (_, i) => {
+        const a = (i / LAKE_SEG) * Math.PI * 2;
+        return R * (1 + 0.22 * Math.sin(3 * a + p1) + 0.12 * Math.sin(5 * a + p2));
+      });
+      const lake = { x, z, R, radii };
+      lakes.push(lake);
+      const ext = R * 1.4 + 16;
+      for (let pz = z - ext; pz <= z + ext; pz += RC / 2) {
+        for (let px = x - ext; px <= x + ext; px += RC / 2) {
+          const d = Math.hypot(px - x, pz - z) - lakeRadius(lake, px, pz);
+          if (d < 14) waterMask.stamp(px, pz, 0, d < 8 ? 2 : 1); // water reaches lakeRadius + 6
+        }
+      }
+      break;
+    }
+  }
+  // houses that ended up in the water or on a bank go
+  for (let i = houses.length - 1; i >= 0; i--) if (waterMask.get(houses[i].x, houses[i].z)) houses.splice(i, 1);
+
+  // ---------- burnt land: patches of charred trees and black ground ----------
+  const area0 = (size / 2000) ** 2;
+  const burns = [];
+  for (let tries = 0; burns.length < Math.round(o.burned * 4 * area0) && tries < 200; tries++) {
+    const x = r(-half + 100, half - 100);
+    const z = r(-half + 100, half - 100);
+    // fires burn vegetation: forests, tree lines, the shelled grey zone
+    if (!isForest(x, z) && !treeMask.get(x, z) && grey(x, z) < 0.35 && !chance(0.15)) continue;
+    const R = r(45, 130);
+    if (Math.hypot(x - launchRef.x, z - launchRef.z) < R + 40) continue;
+    burns.push({ x, z, R });
+  }
+  const burnAt = (x, z) => {
+    let v = 0;
+    for (const b of burns) {
+      const d = Math.hypot(x - b.x, z - b.z);
+      if (d > b.R * 1.3) continue;
+      const edge = b.R * (0.8 + 0.35 * fbm(x / 35 + b.x * 0.01, z / 35 - b.z * 0.01, 2));
+      v = Math.max(v, smoothstep(0, 0.25, 1 - d / edge));
+    }
+    return v;
+  };
+
   // ---------- launch spot ----------
   const launchCandidates = {
     field: () => {
       for (let i = 0; i < 60; i++) {
         const x = launchRef.x + r(-120, 120);
         const z = launchRef.z + r(-80, 80);
-        if (!isForest(x, z) && !treeMask.get(x, z) && !roadMask.get(x, z)) return { x, z, clear: 6 };
+        if (!isForest(x, z) && !treeMask.get(x, z) && !roadMask.get(x, z) && !waterMask.get(x, z)) return { x, z, clear: 6 };
       }
       return null;
     },
@@ -388,7 +536,7 @@ export function generateLayout(seed, options = {}) {
         const x = t.x1 + ex * sOn + nx * 8;
         const z = t.z1 + ez * sOn + nz * 8;
         const d = Math.hypot(x - launchRef.x, z - launchRef.z);
-        if (d < 260 && (!best || d < best.d) && !roadMask.get(x, z)) best = { x, z, d, clear: 5 };
+        if (d < 260 && (!best || d < best.d) && !roadMask.get(x, z) && !waterMask.get(x, z)) best = { x, z, d, clear: 5 };
       }
       return best;
     },
@@ -396,19 +544,19 @@ export function generateLayout(seed, options = {}) {
       for (let i = 0; i < 300; i++) {
         const x = launchRef.x + r(-250, 250);
         const z = launchRef.z + r(-150, 150);
-        if ([0, 1, 2, 3, 4, 5].every((k) => isForest(x + Math.cos(k) * 25, z + Math.sin(k) * 25)) && isForest(x, z)) return { x, z, clear: 9 };
+        if ([0, 1, 2, 3, 4, 5].every((k) => isForest(x + Math.cos(k) * 25, z + Math.sin(k) * 25)) && isForest(x, z) && !waterMask.get(x, z)) return { x, z, clear: 9 };
       }
       return null;
     },
     ravine: () => {
       const p = nearestRavinePoint(launchRef.x, launchRef.z, 450);
-      return p && p.ravine.depth > 4 && !roadMask.get(p.x, p.z) ? { x: p.x, z: p.z, clear: 6 } : null;
+      return p && p.ravine.depth > 4 && !roadMask.get(p.x, p.z) && !waterMask.get(p.x, p.z) ? { x: p.x, z: p.z, clear: 6 } : null;
     },
     ruins: () => {
       for (let i = 0; i < 40; i++) {
         const x = launchRef.x + r(-120, 120);
         const z = launchRef.z + r(-80, 80);
-        if (!isForest(x, z) && !roadMask.get(x, z)) return { x, z, clear: 6, ruins: true };
+        if (!isForest(x, z) && !roadMask.get(x, z) && !waterMask.get(x, z)) return { x, z, clear: 6, ruins: true };
       }
       return null;
     },
@@ -423,7 +571,7 @@ export function generateLayout(seed, options = {}) {
           const x = x1 - ((z1 - z0) / len) * 6;
           const z = z1 + ((x1 - x0) / len) * 6;
           const d = Math.hypot(x - launchRef.x, z - launchRef.z);
-          if (d < 400 && (!best || d < best.d) && !roadMask.get(x, z)) best = { x, z, d, clear: 6 };
+          if (d < 400 && (!best || d < best.d) && !roadMask.get(x, z) && !waterMask.get(x, z)) best = { x, z, d, clear: 6 };
         }
       }
       return best;
@@ -457,6 +605,7 @@ export function generateLayout(seed, options = {}) {
         const a = (k / n) * Math.PI * 2 + r(-0.4, 0.4);
         const d = kind === 'barn' ? r(18, 22) : r(13, 17);
         const dims = kind === 'barn' ? [r(8, 10), r(12, 16), r(3.6, 4.4)] : kind === 'shed' ? [r(3, 4), r(3.5, 4.5), r(2.2, 2.5)] : [r(6, 9), r(5, 7), r(2.6, 3.2)];
+        if (waterMask.get(c.x + Math.cos(a) * d, c.z + Math.sin(a) * d)) continue;
         houses.push({ kind, x: c.x + Math.cos(a) * d, z: c.z + Math.sin(a) * d, w: dims[0], d: dims[1], h: dims[2], yaw: -a + Math.PI / 2, ruined: true, farm: true, back: [Math.cos(a), Math.sin(a)] });
       }
       yardMask.stamp(c.x, c.z, 18, 1);
@@ -567,6 +716,145 @@ export function generateLayout(seed, options = {}) {
     }
   }
 
+  // ---------- water: carve river beds and lake basins, levels from the surrounding ground ----------
+  const sampleH = (x, z) => {
+    const fx = Math.min(n - 1e-6, Math.max(0, (x + half) / cell));
+    const fz = Math.min(n - 1e-6, Math.max(0, (z + half) / cell));
+    const ix = Math.floor(fx);
+    const iz = Math.floor(fz);
+    const tx = fx - ix;
+    const tz = fz - iz;
+    const a = heights[iz * stride + ix];
+    const b = heights[iz * stride + ix + 1];
+    const c = heights[(iz + 1) * stride + ix];
+    const d = heights[(iz + 1) * stride + ix + 1];
+    return a + (b - a) * tx + (c - a) * tz + (a - b - c + d) * tx * tz;
+  };
+  const BANK = 14; // m of bank above the waterline, cut down to a gentle slope
+  for (const rv of rivers) {
+    const hw = rv.width / 2;
+    const raw = rv.pts.map(([x, z], i) => {
+      const [qx, qz] = rv.pts[Math.min(i + 1, rv.pts.length - 1)];
+      const [px, pz] = rv.pts[Math.max(i - 1, 0)];
+      const len = Math.hypot(qx - px, qz - pz) || 1;
+      const nx = -(qz - pz) / len;
+      const nz = (qx - px) / len;
+      return Math.min(sampleH(x, z), sampleH(x + nx * (hw + 4), z + nz * (hw + 4)), sampleH(x - nx * (hw + 4), z - nz * (hw + 4)));
+    });
+    // moving minimum then average: a level surface that follows the valley without steps
+    const mins = raw.map((_, i) => Math.min(...raw.slice(Math.max(0, i - 12), i + 13)));
+    rv.levels = mins.map((_, i) => {
+      const w = mins.slice(Math.max(0, i - 4), i + 5);
+      return w.reduce((a, b) => a + b, 0) / w.length - 0.35;
+    });
+    rv.depth = r(1.2, 2.2);
+    const target = new Float32Array(stride * stride).fill(Infinity); // lowest wanted height (bed, cut banks)
+    const raise = new Map(); // low bank vertices -> height to raise them to (not inside any channel)
+    const channel = new Set();
+    for (let i = 1; i < rv.pts.length; i++) {
+      const [x0, z0] = rv.pts[i - 1];
+      const [x1, z1] = rv.pts[i];
+      const ex = x1 - x0;
+      const ez = z1 - z0;
+      const len2 = ex * ex + ez * ez;
+      forVertices((x0 + x1) / 2, (z0 + z1) / 2, Math.sqrt(len2) / 2 + hw + BANK, (vi, dx, dz) => {
+        const vx = (x0 + x1) / 2 + dx;
+        const vz = (z0 + z1) / 2 + dz;
+        const t = Math.max(0, Math.min(1, ((vx - x0) * ex + (vz - z0) * ez) / len2));
+        const d = Math.hypot(vx - (x0 + ex * t), vz - (z0 + ez * t));
+        if (d >= hw + BANK) return;
+        const level = rv.levels[i - 1] + (rv.levels[i] - rv.levels[i - 1]) * t;
+        const ford = roadZone.get(vx, vz) / 5; // shallow where a road crosses
+        const fade = edgeFade(vx, vz);
+        let h;
+        if (d < hw) h = level - Math.max(0.25, rv.depth * (1 - ford)) * (1 - (d / hw) ** 2) - 0.05;
+        else h = level + 0.25 + ((d - hw) / BANK) * 3.5;
+        h = heights[vi] + (h - heights[vi]) * fade;
+        if (h < target[vi]) target[vi] = h;
+        if (d < hw) channel.add(vi);
+        else if (d < hw + 4) raise.set(vi, Math.max(raise.get(vi) ?? -Infinity, level + 0.15)); // low banks: no floating water edge
+      });
+    }
+    for (let i = 0; i < target.length; i++) if (target[i] < heights[i]) heights[i] = target[i];
+    for (const [vi, h] of raise) if (!channel.has(vi) && h > heights[vi] && h - heights[vi] < 1.5) heights[vi] = h;
+    for (let i = 1; i < rv.pts.length; i++) {
+      for (let f = 0; f < 1; f += 0.5) {
+        const px = rv.pts[i - 1][0] + (rv.pts[i][0] - rv.pts[i - 1][0]) * f;
+        const pz = rv.pts[i - 1][1] + (rv.pts[i][1] - rv.pts[i - 1][1]) * f;
+        for (let dz = -hw - 10; dz <= hw + 10; dz += RC) {
+          for (let dx = -hw - 10; dx <= hw + 10; dx += RC) {
+            const d = Math.hypot(dx, dz);
+            if (d < hw + 10) wet.max(px + dx, pz + dz, d < hw + 3 ? 1 : 0.7);
+          }
+        }
+      }
+    }
+  }
+  for (const l of lakes) {
+    let ring = Infinity;
+    for (let a = 0; a < LAKE_SEG; a += 2) {
+      const ang = (a / LAKE_SEG) * Math.PI * 2;
+      ring = Math.min(ring, sampleH(l.x + Math.cos(ang) * (l.radii[a] + 4), l.z + Math.sin(ang) * (l.radii[a] + 4)));
+    }
+    l.level = ring - 0.3;
+    l.depth = r(1.8, 3.5);
+    forVertices(l.x, l.z, l.R * 1.4 + BANK, (vi, dx, dz) => {
+      const vx = l.x + dx;
+      const vz = l.z + dz;
+      const lr = lakeRadius(l, vx, vz);
+      const d = Math.hypot(dx, dz);
+      if (d < lr) {
+        heights[vi] = Math.min(heights[vi], l.level - 0.25 - l.depth * (1 - (d / lr) ** 2) ** 0.7);
+      } else if (d < lr + BANK) {
+        const dm = d - lr;
+        let h = Math.min(heights[vi], l.level + 0.3 + (dm / BANK) * 3);
+        if (dm < 4) h = Math.max(h, l.level + 0.15);
+        heights[vi] = h;
+      }
+      if (d < lr + 10) wet.max(vx, vz, d < lr + 3 ? 1 : 0.7);
+    });
+  }
+  // Water surface at (x, z) where the ground is below it, else null
+  const segHash = new Map(); // 32 m cells -> [river, segment index]
+  rivers.forEach((rv, ri) => {
+    for (let i = 1; i < rv.pts.length; i++) {
+      const m = rv.width / 2 + 4;
+      const x0 = Math.min(rv.pts[i - 1][0], rv.pts[i][0]) - m;
+      const x1 = Math.max(rv.pts[i - 1][0], rv.pts[i][0]) + m;
+      const z0 = Math.min(rv.pts[i - 1][1], rv.pts[i][1]) - m;
+      const z1 = Math.max(rv.pts[i - 1][1], rv.pts[i][1]) + m;
+      for (let cx = Math.floor(x0 / 32); cx <= Math.floor(x1 / 32); cx++) {
+        for (let cz = Math.floor(z0 / 32); cz <= Math.floor(z1 / 32); cz++) {
+          const k = cx * 100000 + cz;
+          if (!segHash.has(k)) segHash.set(k, []);
+          segHash.get(k).push([ri, i]);
+        }
+      }
+    }
+  });
+  function waterLevel(x, z) {
+    let level = null;
+    for (const l of lakes) {
+      const d = Math.hypot(x - l.x, z - l.z);
+      if (d < l.R * 1.4 + 6 && d < lakeRadius(l, x, z) + 6) level = Math.max(level ?? -Infinity, l.level);
+    }
+    const list = segHash.get(Math.floor(x / 32) * 100000 + Math.floor(z / 32));
+    if (list) {
+      for (const [ri, i] of list) {
+        const rv = rivers[ri];
+        const [x0, z0] = rv.pts[i - 1];
+        const [x1, z1] = rv.pts[i];
+        const ex = x1 - x0;
+        const ez = z1 - z0;
+        const t = Math.max(0, Math.min(1, ((x - x0) * ex + (z - z0) * ez) / (ex * ex + ez * ez)));
+        if (Math.hypot(x - (x0 + ex * t), z - (z0 + ez * t)) < rv.width / 2 + 4) {
+          level = Math.max(level ?? -Infinity, rv.levels[i - 1] + (rv.levels[i] - rv.levels[i - 1]) * t);
+        }
+      }
+    }
+    return level;
+  }
+
   // ---------- craters (bowls carved into the height grid + decals) ----------
   const craters = [];
   const craterCount = Math.round(o.craters * 700 * (size / 2000) ** 2);
@@ -575,7 +863,7 @@ export function generateLayout(seed, options = {}) {
     const z = r(-half + 40, half - 40);
     const g = grey(x, z);
     if (rand() > 0.05 + g * 0.95) continue;
-    if (Math.hypot(x - launch.x, z - launch.z) < launch.clear + 15) continue;
+    if (Math.hypot(x - launch.x, z - launch.z) < launch.clear + 15 || waterMask.get(x, z)) continue;
     const big = chance(0.15);
     craters.push({ x, z, r: big ? r(3.5, 6) : r(1.2, 3) });
   }
@@ -607,7 +895,14 @@ export function generateLayout(seed, options = {}) {
     return h11 + (cellH(ix, iz + 1) - h11) * (1 - tx) + (cellH(ix + 1, iz) - h11) * (1 - tz);
   }
 
+  function waterAt(x, z) {
+    const level = waterLevel(x, z);
+    return level !== null && heightAt(x, z) < level ? level : null;
+  }
+
   // ---------- ground colour ----------
+  const [tint, tintK] = SEASON_TINT[season];
+  const mix3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
   function groundColor(x, z, out) {
     const road = roadMask.get(x, z);
     let c;
@@ -632,14 +927,35 @@ export function generateLayout(seed, options = {}) {
     cr += (COLORS.scorched[0] - cr) * scorch;
     cg += (COLORS.scorched[1] - cg) * scorch;
     cb += (COLORS.scorched[2] - cb) * scorch;
-    if (road !== 1 && fieldCrop(x, z) === 'plowed' && !treeMask.get(x, z)) {
+    const field = !road && !isForest(x, z) && !yardMask.get(x, z);
+    const plowed = road !== 1 && fieldCrop(x, z) === 'plowed' && !treeMask.get(x, z);
+    let stripe = 1;
+    if (plowed) {
       const [u] = toGrid(x, z);
-      const stripe = Math.floor(u / 3) % 2 ? 0.92 : 1; // furrows
+      stripe = Math.floor(u / 3) % 2 ? 0.92 : 1; // furrows
       cr *= stripe;
       cg *= stripe;
       cb *= stripe;
     }
-    return out.setRGB(cr, cg, cb);
+    let col = [cr, cg, cb];
+    if (tint && !road && !earthMask.get(x, z)) col = mix3(col, tint, tintK * (field ? 1 : 0.6) * (plowed ? 0.3 : 1));
+    const burn = burnAt(x, z);
+    if (burn > 0) col = mix3(col, mix3(CHAR, ASH, smoothstep(0.05, 0.4, fbm(x / 7, z / 7, 2)) * 0.85), Math.min(1, burn * 1.15) * 0.95);
+    if (waterMask.get(x, z) === 2) col = mix3(col, RIVERBED, 0.7);
+    if (winter) {
+      // snow cover; roads are slush, furrows, forest floor and dug earth show through
+      let show = 0.06 + Math.max(0, fbm(x / 30 + 7, z / 30, 2)) * 0.25;
+      if (road === 2) show = 0.7;
+      else if (road === 1) show = 0.4;
+      else if (earthMask.get(x, z)) show = 0.5;
+      else if (isForest(x, z)) show = 0.38;
+      else if (treeMask.get(x, z)) show = 0.22;
+      else if (plowed && stripe < 1) show = 0.55;
+      show = Math.max(show, scorch * 0.55, burn * 0.3);
+      const nsnow = 0.95 + fbm(x / 12, z / 12, 2) * 0.08;
+      col = mix3([SNOW[0] * nsnow, SNOW[1] * nsnow, SNOW[2] * nsnow], [col[0] * 0.8, col[1] * 0.8, col[2] * 0.8], show);
+    }
+    return out.setRGB(col[0], col[1], col[2]);
   }
 
   // ---------- grass: [density 0..1, height m] for the GPU grass ----------
@@ -662,12 +978,21 @@ export function generateLayout(seed, options = {}) {
     }
     const scorch = grey(x, z) * Math.max(0, fbm(x / 90 + 3, z / 90, 2)) * 0.9;
     d *= (1 - scorch * 0.85) * (0.8 + 0.4 * (fbm(x / 22 + 5, z / 22 - 1, 2) * 0.5 + 0.5)); // patchy
+    const burn = burnAt(x, z);
+    d *= 1 - burn * 0.85;
+    h *= 1 - burn * 0.5;
+    if (waterMask.get(x, z) === 2) d = 0;
+    if (season === 'winter') {
+      d *= 0.15; // dry tufts poking through the snow
+      h *= 0.6;
+    } else if (season === 'spring') h *= 0.6;
+    else if (season === 'autumn') h *= 0.8;
     return [Math.min(1, Math.max(0, d)), h];
   }
 
   // ---------- enemy positions ----------
   const occupied = houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.w, h.d) / 2 + 1.5 })); // footprints of placed objects
-  const free = (x, z, rad) => inside(x, z, 40) && !occupied.some((p) => Math.hypot(p.x - x, p.z - z) < p.r + rad);
+  const free = (x, z, rad) => inside(x, z, 40) && !waterMask.get(x, z) && !occupied.some((p) => Math.hypot(p.x - x, p.z - z) < p.r + rad);
   const nearestTreeLinePoint = (x, z) => {
     let best = null;
     let bestD = Infinity;
@@ -780,7 +1105,7 @@ export function generateLayout(seed, options = {}) {
         const rad = type === 'ammo' ? 3 : 5;
         if (!free(x, z, rad)) continue;
         const net = chance(type === 'ammo' ? Math.min(1, o.camoNets + 0.2) : o.camoNets);
-        placed = { type, x, z, yaw, net, branches: !net && type !== 'ammo' && chance(o.branchCamo), site: sites.indexOf(site) };
+        placed = { type, x, z, yaw, net, branches: !net && type !== 'ammo' && chance(o.branchCamo), white: winter && chance(o.whitewash), site: sites.indexOf(site) };
         occupied.push({ x, z, r: rad });
       }
       if (placed) {
@@ -798,11 +1123,11 @@ export function generateLayout(seed, options = {}) {
     const [x0, z0] = route[i - 1];
     const [x1, z1] = route[i];
     const len = Math.hypot(x1 - x0, z1 - z0);
-    const off = r(4, 9) * (chance(0.5) ? 1 : -1);
+    const off = r(5.5, 9) * (chance(0.5) ? 1 : -1); // on the shoulder, not blocking the road
     const x = x1 - ((z1 - z0) / len) * off;
     const z = z1 + ((x1 - x0) / len) * off;
     if (grey(x, z) < 0.3 || !free(x, z, 5)) continue;
-    wrecks.push({ type: pickWeighted(VEHICLE_WEIGHTS), x, z, yaw: Math.atan2(-(x1 - x0), -(z1 - z0)) + r(-0.8, 0.8) });
+    wrecks.push({ type: pickWeighted(VEHICLE_WEIGHTS), x, z, yaw: Math.atan2(-(x1 - x0), -(z1 - z0)) + r(-0.35, 0.35) + (chance(0.5) ? Math.PI : 0) });
     occupied.push({ x, z, r: 5 });
   }
 
@@ -888,18 +1213,19 @@ export function generateLayout(seed, options = {}) {
   }
 
   // Moving vehicles on roads/tracks, starting near the enemy area
-  const routeNames = Object.keys(routes);
+  const routeLen = (pts) => pts.reduce((sum, [x, z], i) => (i ? sum + Math.hypot(x - pts[i - 1][0], z - pts[i - 1][1]) : 0), 0);
+  const routeNames = Object.keys(routes).filter((k) => k === 'main' || routeLen(routes[k]) > 300); // no ping-pong on short tracks
   const moving = [];
   for (let i = 0; i < o.movingVehicles; i++) {
     const route = routeNames[i === 0 ? 0 : Math.floor(rand() * routeNames.length)];
-    moving.push({ type: pickWeighted({ truck: 0.3, car: 0.25, apc: 0.15, ifv: 0.15, tank: 0.15 }), route, speed: r(4, 9), start: r(0.2, 0.8), dir: chance(0.5) ? 1 : -1 });
+    moving.push({ type: pickWeighted({ truck: 0.3, car: 0.25, apc: 0.15, ifv: 0.15, tank: 0.15 }), route, speed: r(4, 9), start: r(0.2, 0.8), dir: chance(0.5) ? 1 : -1, white: winter && chance(o.whitewash) });
   }
 
   // ---------- vegetation ----------
   const trees = []; // { kind: species name (vegetation.js SPECIES), x, z, h }
   const bushes = []; // { x, z, r, h }
   const blocked = (x, z, rad) =>
-    roadMask.get(x, z) || Math.hypot(x - launch.x, z - launch.z) < launch.clear + rad ||
+    roadMask.get(x, z) || (waterMask.get(x, z) && waterAt(x, z) !== null) || Math.hypot(x - launch.x, z - launch.z) < launch.clear + rad ||
     occupied.some((p) => Math.abs(p.x - x) < p.r + rad && Math.abs(p.z - z) < p.r + rad && Math.hypot(p.x - x, p.z - z) < p.r + rad - 1);
   const veg = o.vegetation;
   // mix: a TREE_MIX key or a species name; height comes from the species
@@ -908,6 +1234,9 @@ export function generateLayout(seed, options = {}) {
     if (mix === 'treeline' && wet.get(x, z) > 0.4 && chance(0.5)) kind = 'willow';
     const g = grey(x, z);
     if (chance(g * 0.45)) kind = 'dead'; // shelling strips the crowns
+    const burn = burnAt(x, z);
+    if (burn > 0.5) kind = chance(0.85) ? 'burnt' : 'dead';
+    else if (burn > 0.12 && chance(0.5)) kind = 'dead';
     const [h0, h1] = TREE_HEIGHT[kind];
     const h = r(h0, h1);
     // Trunks may stand right beside a parked vehicle so the crown hangs over it
@@ -916,7 +1245,7 @@ export function generateLayout(seed, options = {}) {
     trees.push({ kind, x, z, h });
   };
   const addBush = (x, z, rad) => {
-    if (!inside(x, z, 10) || blocked(x, z, 0)) return;
+    if (!inside(x, z, 10) || blocked(x, z, 0) || chance(burnAt(x, z) * 0.9)) return;
     bushes.push({ x, z, r: rad, h: rad * r(0.7, 1.1) });
   };
 
@@ -991,13 +1320,83 @@ export function generateLayout(seed, options = {}) {
     const x = p.x + Math.cos(p.yaw) * off * side - Math.sin(p.yaw) * along;
     const z = p.z - Math.sin(p.yaw) * off * side - Math.cos(p.yaw) * along;
     const kind = pickWeighted(TREE_MIX.cover);
-    if (inside(x, z, 10) && !roadMask.get(x, z)) trees.push({ kind, x, z, h: r(TREE_HEIGHT[kind][0] + 1, TREE_HEIGHT[kind][1]) });
+    if (inside(x, z, 10) && !roadMask.get(x, z) && waterAt(x, z) === null) trees.push({ kind, x, z, h: r(TREE_HEIGHT[kind][0] + 1, TREE_HEIGHT[kind][1]) });
   }
   // Bushes around enemy positions help hide them
   for (const p of parked) {
     for (let k = 0; k < 3; k++) {
       const a = r(0, Math.PI * 2);
       addBush(p.x + Math.cos(a) * r(5, 8), p.z + Math.sin(a) * r(5, 8), r(0.8, 1.6));
+    }
+  }
+
+  // Willows and brush along river banks and lake shores
+  for (const rv of rivers) {
+    for (let k = 0; k < rv.pts.length; k++) {
+      const [px, pz] = rv.pts[k];
+      const [qx, qz] = rv.pts[Math.min(k + 1, rv.pts.length - 1)];
+      const len = Math.hypot(qx - px, qz - pz) || 1;
+      for (const side of [-1, 1]) {
+        if (!chance(0.55 * veg)) continue;
+        const off = side * (rv.width / 2 + r(2, 12));
+        const x = px - ((qz - pz) / len) * off + r(-3, 3);
+        const z = pz + ((qx - px) / len) * off + r(-3, 3);
+        if (chance(0.35)) addTree(chance(0.7) ? 'willow' : 'ravine', x, z);
+        else addBush(x, z, r(0.8, 1.8));
+      }
+    }
+  }
+  for (const l of lakes) {
+    for (let a = 0; a < LAKE_SEG; a++) {
+      if (!chance(0.6 * veg)) continue;
+      const ang = (a / LAKE_SEG) * Math.PI * 2 + r(-0.05, 0.05);
+      const d = l.radii[a] + r(3, 14);
+      const x = l.x + Math.cos(ang) * d;
+      const z = l.z + Math.sin(ang) * d;
+      if (chance(0.3)) addTree('willow', x, z);
+      else addBush(x, z, r(0.8, 1.8));
+    }
+  }
+
+  // ---------- fallen trees: logs on the ground, uprooted (root plate) or snapped (stump) ----------
+  const fallen = []; // { x, z, yaw, len, r, kind, root: 'plate' | 'stump' }
+  const trunkHash = new Map(); // 8 m cells of standing trunks, to keep logs clear of them
+  for (const t of trees) {
+    const k = Math.floor(t.x / 8) * 100000 + Math.floor(t.z / 8);
+    if (!trunkHash.has(k)) trunkHash.set(k, []);
+    trunkHash.get(k).push(t);
+  }
+  const nearTrunk = (x, z, rad) => {
+    for (let cx = Math.floor((x - rad) / 8); cx <= Math.floor((x + rad) / 8); cx++) {
+      for (let cz = Math.floor((z - rad) / 8); cz <= Math.floor((z + rad) / 8); cz++) {
+        for (const t of trunkHash.get(cx * 100000 + cz) ?? []) if (Math.hypot(t.x - x, t.z - z) < rad) return true;
+      }
+    }
+    return false;
+  };
+  const addFallen = (x, z, kind) => {
+    const len = r(6, 15);
+    const yaw = r(0, Math.PI * 2);
+    const ux = -Math.sin(yaw);
+    const uz = -Math.cos(yaw);
+    for (let f = 0; f <= 1.001; f += 0.25) {
+      const px = x + ux * len * f;
+      const pz = z + uz * len * f;
+      if (!inside(px, pz, 15) || blocked(px, pz, 1) || waterMask.get(px, pz) || nearTrunk(px, pz, 0.9)) return;
+    }
+    fallen.push({ x, z, yaw, len, r: r(0.14, 0.28), kind, root: chance(0.45) ? 'plate' : 'stump' });
+  };
+  const fallenRate = o.fallenTrees;
+  for (let z = -half + 40; z < half - 40; z += 18) {
+    for (let x = -half + 40; x < half - 40; x += 18) {
+      const px = x + r(-8, 8);
+      const pz = z + r(-8, 8);
+      const burn = burnAt(px, pz);
+      const forest = isForest(px, pz);
+      const p = (forest ? 0.07 : treeMask.get(px, pz) ? 0.05 : 0.004) * (1 + grey(px, pz) * 2 + burn * 3) * fallenRate;
+      if (!chance(p)) continue;
+      const pineZone = fbm(px / 250 - 20, pz / 250 + 7, 2) > 0;
+      addFallen(px, pz, burn > 0.4 ? 'burnt' : forest ? (pineZone ? 'pine' : chance(0.5) ? 'birch' : 'oak') : chance(0.5) ? 'acacia' : 'oak');
     }
   }
 
@@ -1018,7 +1417,7 @@ export function generateLayout(seed, options = {}) {
     }
   }
   for (const rv of ravines) {
-    for (let k = 0; k < rv.pts.length; k += 5) if (inside(...rv.pts[k], 40)) coverPoints.push(rv.pts[k]);
+    for (let k = 0; k < rv.pts.length; k += 5) if (inside(...rv.pts[k], 40) && !waterMask.get(...rv.pts[k])) coverPoints.push(rv.pts[k]);
   }
 
   return {
@@ -1049,5 +1448,10 @@ export function generateLayout(seed, options = {}) {
     villageCenter,
     mainRoad,
     grey,
+    season,
+    water: { rivers, lakes, frozen: winter },
+    waterAt, // water surface where the ground is below it, else null
+    burns,
+    fallen,
   };
 }

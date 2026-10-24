@@ -142,6 +142,36 @@ export function createCameraFx(renderer) {
       resize();
     },
     resize,
+    // Where a projected point (NDC, -1..1) ends up on screen after the barrel distortion:
+    // inverse of the shader's lens() (radial, solved with a few Newton steps)
+    toScreen(x, y, out = [0, 0]) {
+      const k = enabled ? uniforms.distortion.value : 0;
+      if (!k) {
+        out[0] = x;
+        out[1] = y;
+        return out;
+      }
+      const aspect = uniforms.aspect.value;
+      const sx = (x / 2) * aspect;
+      const sy = y / 2;
+      const rs = Math.hypot(sx, sy);
+      if (rs < 1e-6) {
+        out[0] = x;
+        out[1] = y;
+        return out;
+      }
+      const D = 1 + k * (aspect * aspect * 0.25 + 0.25);
+      let ru = rs;
+      for (let i = 0; i < 8; i++) ru -= ((ru * (1 + k * ru * ru)) / D - rs) / ((1 + 3 * k * ru * ru) / D);
+      const f = ru / rs;
+      out[0] = x * f;
+      out[1] = y * f;
+      return out;
+    },
+    // height in pixels the scene renders at
+    get height() {
+      return enabled ? target.height : size.y * renderer.getPixelRatio();
+    },
     render(scene, camera, dt) {
       if (!enabled) {
         renderer.setRenderTarget(null);

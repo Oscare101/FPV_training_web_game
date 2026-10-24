@@ -6,6 +6,10 @@ const CONE = 1;
 const ELLIPSOID = 2;
 const BOX = 3;
 const OBB = 4;
+const CAPSULE = 5;
+
+// Obstacles a vehicle can't drive through: trunks, poles, buildings, fences, wrecks, logs (not bushes or crowns)
+export const isSolidForVehicles = (c) => c.type === CYLINDER || c.type === BOX || c.type === OBB || c.type === CAPSULE;
 
 const cellKey = (ix, iz) => (ix + 10000) * 20000 + (iz + 10000);
 
@@ -55,11 +59,17 @@ export class StaticColliders {
     this.insert({ type: OBB, kind, x, y, z, hx, hy, hz, cos: Math.cos(yaw), sin: Math.sin(yaw) }, x - r, x + r, z - r, z + r);
   }
 
-  // Returns the first collider touching the sphere, or null.
-  hits(p, r) {
+  // Capsule: segment a-b with radius r (fallen logs)
+  addCapsule(kind, ax, ay, az, bx, by, bz, r) {
+    this.insert({ type: CAPSULE, kind, ax, ay, az, bx, by, bz, r }, Math.min(ax, bx) - r, Math.max(ax, bx) + r, Math.min(az, bz) - r, Math.max(az, bz) + r);
+  }
+
+  // Returns the first collider touching the sphere, or null. filter(c): only consider matching colliders
+  hits(p, r, filter) {
     const list = this.cells.get(cellKey(Math.floor(p.x / CELL), Math.floor(p.z / CELL)));
     if (!list) return null;
     for (const c of list) {
+      if (filter && !filter(c)) continue;
       switch (c.type) {
         case CYLINDER: {
           if (p.y + r < c.y0 || p.y - r > c.y1) break;
@@ -93,6 +103,18 @@ export class StaticColliders {
           const ez = Math.max(Math.abs(dx * c.sin + dz * c.cos) - c.hz, 0);
           const d2 = ex * ex + ey * ey + ez * ez;
           if (d2 < r * r || d2 === 0) return c; // d2 = 0: inside (also for r = 0 line-of-sight probes)
+          break;
+        }
+        case CAPSULE: {
+          const ex = c.bx - c.ax;
+          const ey = c.by - c.ay;
+          const ez = c.bz - c.az;
+          const t = Math.max(0, Math.min(1, ((p.x - c.ax) * ex + (p.y - c.ay) * ey + (p.z - c.az) * ez) / (ex * ex + ey * ey + ez * ez)));
+          const dx = p.x - c.ax - ex * t;
+          const dy = p.y - c.ay - ey * t;
+          const dz = p.z - c.az - ez * t;
+          const rr = c.r + r;
+          if (dx * dx + dy * dy + dz * dz < rr * rr) return c;
           break;
         }
         case BOX: {

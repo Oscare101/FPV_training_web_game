@@ -13,12 +13,13 @@ export const CHANNEL_INFO = {
 };
 
 // On/off functions from a radio switch (axis) or button.
-export const SWITCHES = ['arm', 'reset', 'detonate'];
+export const SWITCHES = ['arm', 'reset', 'detonate', 'screenshot'];
 
 export const SWITCH_INFO = {
-  arm: { label: 'Arm' },
-  reset: { label: 'Reset' },
-  detonate: { label: 'Detonate' },
+  arm: { label: 'Arm', tip: 'Arms the motors when ON. Arming needs low throttle; flip OFF and ON again after a crash.' },
+  reset: { label: 'Reset', tip: 'Puts the drone back on the launch point (same as R).' },
+  detonate: { label: 'Detonate', tip: 'Fires the strike charge manually (same as X). Only in strike missions, after the charge is armed.' },
+  screenshot: { label: 'Screenshot', tip: 'Saves a screenshot when switched ON (same as K). A momentary button works best.' },
 };
 
 export const defaultSwitch = () => ({ source: 'none', index: 0, invert: false });
@@ -36,7 +37,7 @@ export function defaultInputConfig() {
       throttle: { axis: 2, invert: false },
       yaw: { axis: 3, invert: false },
     },
-    switches: { arm: defaultSwitch(), reset: defaultSwitch(), detonate: defaultSwitch() }, // source: 'none' | 'axis' | 'button'
+    switches: Object.fromEntries(SWITCHES.map((sw) => [sw, defaultSwitch()])), // source: 'none' | 'axis' | 'button'
     axes: [], // per raw axis: { min, center, max }
     deadzone: 0.02,
     calibrated: false,

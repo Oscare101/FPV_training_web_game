@@ -62,6 +62,7 @@ export class FlightController {
     this.onImpact = null;
     this.onReset = null;
     this.groundHit = { kind: 'ground', vDown: 0, skid: 0, hard: false };
+    this.waterHit = { kind: 'water', vDown: 0, skid: 0, hard: true };
     this.armBlock = null; // 'throttle' when an arm attempt was refused
     this.crashTimer = 0;
     this.flightTime = 0;
@@ -151,7 +152,9 @@ export class FlightController {
         if (!c.arm) this.status = 'disarmed';
         break;
       case 'disarmed':
-        if (armRise) {
+        // hotArm (Hunt: next drone on the pad): an arm switch that is already on arms it
+        if (armRise || (this.hotArm && c.arm)) {
+          this.hotArm = false;
           if (c.throttle > ARM_THROTTLE_MAX) this.armBlock = 'throttle';
           else this.status = 'armed';
         }
@@ -174,7 +177,7 @@ export class FlightController {
     this.accumulator += dt;
     let steps = 0;
     while (this.accumulator >= STEP && steps < MAX_STEPS) {
-      env.groundHeight = this.world.heightAt(d.position.x, d.position.z);
+      env.groundHeight = this.surfaceAt(d.position.x, d.position.z);
       const agl = d.position.y - env.groundHeight;
       this.wind.step(STEP);
       this.wind.velocityAt(agl, env.wind);
@@ -210,7 +213,14 @@ export class FlightController {
     const hit = this.world.hitTest(p, r);
     if (hit) return this.onImpact?.(hit, d) ? this.detonate() : this.crash(hit.kind);
 
-    const ground = this.world.heightAt(p.x, p.z);
+    // liquid water: always a crash (frozen water counts as ground)
+    const water = this.world.waterAt?.(p.x, p.z) ?? null;
+    if (water !== null && !this.world.waterFrozen && p.y < water + r) {
+      this.waterHit.vDown = -v.y;
+      this.waterHit.skid = Math.hypot(v.x, v.z);
+      return this.onImpact?.(this.waterHit, d) ? this.detonate() : this.crash('water');
+    }
+    const ground = water !== null && this.world.waterFrozen ? Math.max(water, this.world.heightAt(p.x, p.z)) : this.world.heightAt(p.x, p.z);
     if (p.y < ground + r) {
       _up.set(0, 1, 0).applyQuaternion(d.quaternion);
       const g = this.groundHit;
@@ -251,9 +261,16 @@ export class FlightController {
     return true;
   }
 
+  // Ground or water surface height
+  surfaceAt(x, z) {
+    const ground = this.world.heightAt(x, z);
+    const water = this.world.waterAt?.(x, z) ?? null;
+    return water === null ? ground : Math.max(ground, water);
+  }
+
   get altitude() {
     const p = this.drone.position;
-    return p.y - this.world.heightAt(p.x, p.z) - this.drone.spec.radius;
+    return p.y - this.surfaceAt(p.x, p.z) - this.drone.spec.radius;
   }
 
   get speed() {

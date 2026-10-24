@@ -43,7 +43,36 @@ export const SPECIES = {
     blobs: [[0.62, 0, 0.1, 0], [0.48, 0.42, -0.15, 0.2], [0.46, -0.4, -0.1, -0.22], [0.4, 0.05, 0.4, -0.3]],
   },
   dead: { height: [4, 11], trunk: [1, 1], trunkR: 0.17, bark: 0x3a332c }, // snapped by shelling: trunk and stubs
+  burnt: { height: [6, 15], trunk: [1, 1], trunkR: 0.2, bark: 0x1c1916 }, // charred by a fire: black trunk and stubs
 };
+// Deciduous species: autumn colours [hue min, hue max, saturation, light min, light max], bare in winter
+const AUTUMN = {
+  oak: [0.06, 0.1, 0.5, 0.2, 0.28],
+  birch: [0.12, 0.15, 0.6, 0.33, 0.43],
+  poplar: [0.12, 0.16, 0.55, 0.28, 0.38],
+  acacia: [0.13, 0.18, 0.45, 0.26, 0.34],
+  willow: [0.15, 0.2, 0.35, 0.28, 0.36],
+  fruit: [0.0, 0.06, 0.5, 0.24, 0.32],
+};
+// Bare winter crown: unit-space twigs from the trunk top (y = -0.5) out to the crown, drawn with the bark
+function branchGeometry() {
+  const between = (a, b, r0, r1) => {
+    const dir = new THREE.Vector3().subVectors(b, a);
+    const g = new THREE.CylinderGeometry(r1, r0, dir.length(), 3, 1, true).translate(0, dir.length() / 2, 0);
+    g.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize()));
+    return g.translate(a.x, a.y, a.z);
+  };
+  const V = (x, y, z) => new THREE.Vector3(x, y, z);
+  const parts = [between(V(0, -0.55, 0), V(0.05, 0.8, 0.02), 0.045, 0.01)];
+  for (let k = 0; k < 5; k++) {
+    const a = k * 2.5;
+    const y0 = -0.45 + (k % 3) * 0.18;
+    const tip = V(Math.cos(a) * 0.78, 0.05 + (k % 4) * 0.16, Math.sin(a) * 0.78);
+    parts.push(between(V(0, y0, 0), tip, 0.03, 0.008));
+    if (k % 2 === 0) parts.push(between(tip.clone().multiplyScalar(0.55).setY(y0 * 0.45 + tip.y * 0.55), V(Math.cos(a + 0.7) * 0.6, tip.y + 0.25, Math.sin(a + 0.7) * 0.6), 0.015, 0.006));
+  }
+  return mergeGeometries(parts.map((g) => g.toNonIndexed()));
+}
 export const SPECIES_NAMES = Object.keys(SPECIES);
 const BLOB_VARIANTS = 2; // per species: as specified, and mirrored with a flatter top
 
@@ -88,10 +117,38 @@ function shapes(detail) {
   return out;
 }
 
+// See-through twig mass for bare winter crowns: the crown shape with noise holes (same colliders,
+// you still hit a bare tree). No shadow of its own.
+function createBareMaterial() {
+  const m = new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide });
+  m.defines = { FPV_NO_SNOW: '' }; // fine twigs hold little snow
+  m.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying vec3 vTwig;')
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\nvTwig = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz;');
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vTwig;
+        float twigHash(vec3 p) { p = fract(p * 0.1031); p += dot(p, p.zyx + 31.32); return fract((p.x + p.y) * p.z); }
+        float twigNoise(vec3 p) {
+          vec3 i = floor(p), f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(mix(twigHash(i), twigHash(i + vec3(1, 0, 0)), f.x), mix(twigHash(i + vec3(0, 1, 0)), twigHash(i + vec3(1, 1, 0)), f.x), f.y),
+                     mix(mix(twigHash(i + vec3(0, 0, 1)), twigHash(i + vec3(1, 0, 1)), f.x), mix(twigHash(i + vec3(0, 1, 1)), twigHash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+        }`)
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+        if (twigNoise(vTwig * 4.0) * 0.5 + twigNoise(vTwig * 11.0) * 0.5 < 0.6) discard;`)
+      .replace('#include <normal_fragment_begin>', '#include <normal_fragment_begin>\nnormal = normalize(mix(normal, vec3(0.0, 1.0, 0.0), 0.6)); // a twig mass is lit like a haze, not like a solid');
+  };
+  m.userData.noCastShadow = true;
+  return m;
+}
+
 export function createVegetationMaterials() {
   return {
     trunk: new THREE.MeshLambertMaterial({ color: 0xffffff }),
     foliage: new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true }),
+    bare: createBareMaterial(),
     shade: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.32, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }),
   };
 }
@@ -104,6 +161,9 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
   const farGeo = detailName === 'low' ? null : shapes(DETAIL.low);
   const trunkGeo = new THREE.CylinderGeometry(0.6, 1, 1, 6, 1, true).translate(0, 0.5, 0);
   const stubGeo = new THREE.CylinderGeometry(0.5, 1, 1, 4, 1, true).translate(0, 0.5, 0);
+  const season = layout.season ?? 'summer';
+  const winter = season === 'winter';
+  const branchGeo = winter ? branchGeometry() : null;
   const discGeo = new THREE.CircleGeometry(1, 8).rotateX(-Math.PI / 2);
   const blobFit = ICO_FIT[near.ico];
   const conesFit = coneFit(near.segments);
@@ -144,16 +204,19 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
     trunks.count = 0;
     const stubs = new THREE.InstancedMesh(stubGeo, materials.trunk, Math.max(1, trees.length * 3));
     stubs.count = 0;
+    const branches = winter ? new THREE.InstancedMesh(branchGeo, materials.trunk, Math.max(1, trees.length)) : null;
+    if (branches) branches.count = 0;
     const shade = new THREE.InstancedMesh(discGeo, materials.shade, trees.length + bushes.length);
     shade.count = 0;
 
     // Instanced crowns per (species, variant) in every LOD set, created on first use
     const sets = [{ geo: nearGeo, meshes: new Map() }, ...(farGeo ? [{ geo: farGeo, meshes: new Map() }] : [])];
-    const put = (key, geoOf, matrix, color, capacity) => {
+    const put = (key, geoOf, matrix, color, capacity, material = materials.foliage) => {
       for (const set of sets) {
         let mesh = set.meshes.get(key);
         if (!mesh) {
-          mesh = new THREE.InstancedMesh(geoOf(set.geo), materials.foliage, capacity);
+          // far LOD: bare crowns become a solid grey-brown mass (looks the same from afar, no overdraw)
+          mesh = new THREE.InstancedMesh(geoOf(set.geo), set === sets[0] || material !== materials.bare ? material : materials.foliage, capacity);
           mesh.count = 0;
           set.meshes.set(key, mesh);
         }
@@ -174,9 +237,21 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
       q.setFromAxisAngle(up, yaw);
       const trunkH = t.h * (sp.trunk[0] + rand() * (sp.trunk[1] - sp.trunk[0]));
       const tr = sp.trunkR * (0.8 + rand() * 0.4);
-      const leaf = () => col.setHSL(sp.hsl[0] + rand() * (sp.hsl[1] - sp.hsl[0]), sp.hsl[2], sp.hsl[3] + rand() * (sp.hsl[4] - sp.hsl[3]));
+      const autumn = AUTUMN[kind];
+      const bare = winter && !!autumn;
+      const leaf = () => {
+        let h = sp.hsl;
+        if (season === 'autumn' && autumn && rand() > 0.2) h = autumn;
+        else if (bare) return col.setHSL(0.07, 0.12, 0.2 + rand() * 0.07);
+        else if (season === 'spring' && kind === 'fruit' && rand() < 0.6) return col.setHSL(0.95, 0.25, 0.68 + rand() * 0.08); // blossom
+        col.setHSL(h[0] + rand() * (h[1] - h[0]), h[2], h[3] + rand() * (h[4] - h[3]));
+        if (season === 'spring') col.offsetHSL(0.025, 0.1, 0.03);
+        else if (season === 'autumn' && h === sp.hsl) col.offsetHSL(-0.03, 0, 0); // still green, yellowing
+        else if (winter) col.offsetHSL(0, -0.04, -0.02);
+        return col;
+      };
 
-      if (kind === 'dead') {
+      if (kind === 'dead' || kind === 'burnt') {
         trunks.setMatrixAt(trunks.count, m.compose(pos.set(t.x, y, t.z), q, scl.set(tr, t.h, tr)));
         trunks.setColorAt(trunks.count++, bark(sp));
         colliders.addCylinder('tree', t.x, t.z, y, y + t.h, tr);
@@ -206,7 +281,11 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
         const variant = Math.floor(rand() * BLOB_VARIANTS);
         trunks.setMatrixAt(trunks.count, m.compose(pos.set(t.x, y, t.z), q, scl.set(tr, trunkH + ry * 0.5, tr)));
         trunks.setColorAt(trunks.count++, bark(sp));
-        put(`${kind}${variant}`, (g) => g.crowns[kind][variant], m.compose(pos.set(t.x, cy, t.z), q, scl.set(rx, ry, rx)), leaf(), trees.length);
+        put(`${kind}${variant}`, (g) => g.crowns[kind][variant], m.compose(pos.set(t.x, cy, t.z), q, scl.set(rx, ry, rx)), leaf(), trees.length, bare ? materials.bare : materials.foliage);
+        if (bare) {
+          branches.setMatrixAt(branches.count, m);
+          branches.setColorAt(branches.count++, bark(sp));
+        }
         colliders.addCylinder('tree', t.x, t.z, y, y + trunkH, tr);
         addBlobs('tree', variantBlobs[kind][variant], t.x, cy, t.z, yaw, rx, ry);
         addShade(t.x, y + 0.3, t.z, rx * 1.1);
@@ -218,7 +297,10 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
       const yaw = rand() * Math.PI * 2;
       const variant = Math.floor(rand() * BUSHES.length);
       q.setFromAxisAngle(up, yaw);
-      put(`bush${variant}`, (g) => g.bushes[variant], m.compose(pos.set(b.x, y, b.z), q, scl.set(b.r, b.h, b.r)), col.setHSL(0.17 + rand() * 0.1, 0.23, 0.15 + rand() * 0.07), bushes.length);
+      const bushCol = winter ? col.setHSL(0.07, 0.12, 0.2 + rand() * 0.06)
+        : season === 'autumn' && rand() < 0.7 ? col.setHSL(0.05 + rand() * 0.08, 0.45, 0.2 + rand() * 0.08)
+          : col.setHSL(0.17 + rand() * 0.1 + (season === 'spring' ? 0.03 : 0), 0.23 + (season === 'spring' ? 0.08 : 0), 0.15 + rand() * 0.07);
+      put(`bush${variant}`, (g) => g.bushes[variant], m.compose(pos.set(b.x, y, b.z), q, scl.set(b.r, b.h, b.r)), bushCol, bushes.length, winter ? materials.bare : materials.foliage);
       addBlobs('bush', BUSHES[variant], b.x, y, b.z, yaw, b.r, b.h);
       addShade(b.x, y + 0.25, b.z, b.r * 1.15);
     }
@@ -231,8 +313,10 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
     };
     finish(trunks);
     finish(stubs);
+    const branchMesh = branches ? finish(branches) : null;
     finish(shade);
     const lod = sets.map((set) => [...set.meshes.values()].map(finish).filter(Boolean));
+    if (branchMesh && lod.length > 1) lod[0].push(branchMesh); // winter branches only up close
     if (lod.length > 1) lodSets[ci] = { near: lod[0], far: lod[1] };
   });
 
@@ -258,6 +342,7 @@ export function buildVegetation(layout, chunks, colliders, materials, detailName
       }
       trunkGeo.dispose();
       stubGeo.dispose();
+      branchGeo?.dispose();
       discGeo.dispose();
     },
   };

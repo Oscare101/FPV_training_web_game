@@ -5,43 +5,33 @@ const DETECT_SETTLE_MS = 400; // let sticks return to center before taking the b
 const DETECT_TIMEOUT_MS = 10000;
 const MIN_RANGE = 0.5; // calibrated range below this is treated as "stick not moved"
 
-const TEMPLATE = `
-  <div class="calib-panel">
-    <header>
-      <h1>Controller setup</h1>
-      <button data-action="close">Close (Esc)</button>
-    </header>
+const info = (tip) => `<span class="info" data-tip="${tip}">i</span>`;
 
-    <section class="device">
-      <div class="device-status"></div>
-      <select class="device-select" hidden></select>
+const TEMPLATE = `
+  <div class="ctl">
+    <section class="group ctl-device">
+      <div class="ctl-device-row">
+        <span class="ctl-dot"></span>
+        <div class="device-status"></div>
+        <select class="device-select" hidden></select>
+      </div>
+      <p class="ctl-help">RadioMaster / EdgeTX: <b>Model → USB Joystick, mode Classic</b> (or System → USB mode Joystick), then plug in and move a stick.</p>
     </section>
 
-    <div class="columns">
-      <section>
-        <h2>Raw axes</h2>
-        <div class="raw-axes"></div>
-      </section>
-
-      <section>
-        <h2>Channel mapping</h2>
+    <div class="ctl-grid">
+      <section class="group">
+        <h3><span class="step">1</span>Sticks ${info('Which gamepad axis drives each channel. Auto-map asks you to push each stick in turn. Invert flips a channel that moves the wrong way.')}</h3>
         <table class="mapping">
           <thead><tr><th>Channel</th><th>Axis</th><th>Invert</th><th></th><th>Output</th></tr></thead>
           <tbody></tbody>
         </table>
         <div class="row-actions">
-          <button data-action="detect-all">Auto-map all</button>
+          <button data-action="detect-all" class="primary">Auto-map all sticks</button>
         </div>
-        <label class="deadzone">Deadzone
-          <input type="range" min="0" max="0.1" step="0.005" />
-          <span></span>
-        </label>
+      </section>
 
-        <h2 class="sub">Switches</h2>
-        <table class="mapping switches">
-          <thead><tr><th>Function</th><th>Source</th><th>Invert</th><th></th><th>State</th></tr></thead>
-          <tbody></tbody>
-        </table>
+      <section class="group ctl-live">
+        <h3>Live ${info('What the simulator receives after mapping, calibration and deadzone (Mode 2). Dots must follow your sticks exactly.')}</h3>
         <div class="sticks">
           <div class="stick" data-stick="left"><div class="dot"></div><span>Yaw / Throttle</span></div>
           <div class="stick" data-stick="right"><div class="dot"></div><span>Roll / Pitch</span></div>
@@ -49,18 +39,36 @@ const TEMPLATE = `
       </section>
     </div>
 
-    <section class="wizard">
-      <h2>Calibration</h2>
+    <section class="group wizard">
+      <h3><span class="step">2</span>Calibrate ${info('Measures the real min / centre / max of every axis so full stick = full rate and centre = zero. Redo it after changing the radio\'s outputs or trims.')}</h3>
       <p class="wizard-text"></p>
       <div class="row-actions">
-        <button data-action="calib-start">Start calibration</button>
-        <button data-action="calib-next" hidden>Next</button>
+        <button data-action="calib-start" class="primary">Start calibration</button>
+        <button data-action="calib-next" class="primary" hidden>Next</button>
         <button data-action="calib-cancel" hidden>Cancel</button>
-        <button data-action="reset" class="secondary">Reset to defaults</button>
       </div>
     </section>
 
-    <footer>Press <kbd>C</kbd> to open/close this screen. Settings are saved automatically.</footer>
+    <section class="group">
+      <h3><span class="step">3</span>Switches ${info('Radio switches or buttons for in-flight functions. Detect, then flip the switch into its ON position. Each one also has a keyboard key.')}</h3>
+      <table class="mapping switches">
+        <thead><tr><th>Function</th><th>Source</th><th>Invert</th><th></th><th>State</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </section>
+
+    <details class="group adv">
+      <summary>Advanced: raw axes, deadzone, reset</summary>
+      <label class="deadzone">Deadzone ${info('Stick movement around centre that is ignored. Raise it if the drone drifts with sticks centred; keep it as low as possible (1–3%).')}
+        <input type="range" min="0" max="0.1" step="0.005" />
+        <span></span>
+      </label>
+      <h3 class="sub">Raw axes ${info('Unprocessed values from the browser Gamepad API. Ticks: calibrated min / centre / max.')}</h3>
+      <div class="raw-axes"></div>
+      <div class="row-actions">
+        <button data-action="reset" class="secondary">Reset controller to defaults</button>
+      </div>
+    </details>
   </div>
 `;
 
@@ -77,7 +85,8 @@ function setCenteredFill(fill, v) {
 }
 
 export class CalibrationScreen {
-  constructor(input, parent) {
+  // mount: element the setup page is built into (the settings menu's Controller tab)
+  constructor(input, mount) {
     this.input = input;
     this.visible = false;
     this.axisRows = [];
@@ -87,11 +96,8 @@ export class CalibrationScreen {
     this.detect = null; // { kind: 'channel' | 'switch', queue, channel, used, baseline, buttons, settleUntil }
     this.message = '';
 
-    this.root = document.createElement('div');
-    this.root.className = 'calib';
-    this.root.hidden = true;
-    this.root.innerHTML = TEMPLATE;
-    parent.appendChild(this.root);
+    mount.innerHTML = TEMPLATE;
+    this.root = mount.firstElementChild;
 
     const q = (s) => this.root.querySelector(s);
     this.el = {
@@ -103,6 +109,8 @@ export class CalibrationScreen {
       deadzone: q('.deadzone input'),
       deadzoneValue: q('.deadzone span'),
       wizardText: q('.wizard-text'),
+      dot: q('.ctl-dot'),
+      wizard: q('.wizard'),
       start: q('[data-action="calib-start"]'),
       next: q('[data-action="calib-next"]'),
       cancel: q('[data-action="calib-cancel"]'),
@@ -116,22 +124,15 @@ export class CalibrationScreen {
     this.syncControls();
   }
 
-  show() {
-    this.visible = true;
-    this.root.hidden = false;
-    this.syncControls();
-  }
-
-  hide() {
-    this.visible = false;
-    this.root.hidden = true;
-    this.wizard = null;
-    this.detect = null;
-  }
-
-  toggle() {
-    if (this.visible) this.hide();
-    else this.show();
+  // the menu shows/hides the page; visible pauses the flight
+  setVisible(visible) {
+    if (visible === this.visible) return;
+    this.visible = visible;
+    if (visible) this.syncControls();
+    else {
+      this.wizard = null;
+      this.detect = null;
+    }
   }
 
   // ---------- setup ----------
@@ -165,7 +166,7 @@ export class CalibrationScreen {
     for (const sw of SWITCHES) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
-        <td>${SWITCH_INFO[sw].label}</td>
+        <td>${SWITCH_INFO[sw].label} ${info(SWITCH_INFO[sw].tip)}</td>
         <td><select class="switch-select"></select></td>
         <td><input type="checkbox" class="invert" /></td>
         <td><button data-action="detect-switch" data-sw="${sw}">Detect</button></td>
@@ -188,7 +189,6 @@ export class CalibrationScreen {
       const btn = e.target.closest('[data-action]');
       if (!btn) return;
       switch (btn.dataset.action) {
-        case 'close': this.hide(); break;
         case 'calib-start': this.startCalibration(); break;
         case 'calib-next': this.nextCalibrationStep(); break;
         case 'calib-cancel': this.wizard = null; this.message = 'Calibration cancelled.'; break;
@@ -462,6 +462,7 @@ export class CalibrationScreen {
         : 'No controller detected. Put the RadioMaster in USB Joystick mode, plug it in, then move a stick.'
     );
     this.el.status.classList.toggle('warn', !gp);
+    this.el.dot.classList.toggle('on', !!gp);
 
     const pads = this.input.source.list();
     const key = pads.map((p) => `${p.index}:${p.id}`).join('|');
@@ -545,6 +546,7 @@ export class CalibrationScreen {
         : 'Not calibrated yet. Map the axes (Auto-map all), then run calibration.');
     }
     setText(this.el.wizardText, text);
+    this.el.wizard.classList.toggle('active', !!(w || d));
 
     this.el.start.hidden = !!w;
     this.el.next.hidden = !w;

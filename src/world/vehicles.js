@@ -3,6 +3,7 @@ import { mergeParts } from './meshUtils.js';
 import { createDriver } from './vehicleAI.js';
 import { mulberry32 } from './random.js';
 import { VEHICLE_MODELS } from './vehicleModels.js';
+import { createNavGrid } from './navGrid.js';
 
 const DUST_INTERVAL = 0.12; // s between dust puffs behind a fast vehicle
 const DUST_SPEED = 3; // m/s
@@ -66,16 +67,38 @@ const EFFECT_RANK = { none: 0, damaged: 1, immobilized: 2, destroyed: 3 };
 
 // Mud and dust on the lower body, mottled a little higher up
 const MUD = [0.36, 0.31, 0.24];
-function applyGrime(geo, seed) {
+const SEASON_MUD = { spring: 0.8, summer: 0.6, autumn: 0.8, winter: 0.5 }; // wet seasons: muddier
+function applyGrime(geo, seed, amount = 0.6) {
   const pos = geo.attributes.position;
   const col = geo.attributes.color;
   const rand = mulberry32(seed);
   for (let i = 0; i < pos.count; i += 3) {
     // per triangle, so flat-shaded faces stay uniform
     const y = (pos.getY(i) + pos.getY(i + 1) + pos.getY(i + 2)) / 3;
-    const k = Math.min(1, Math.max(0, (1.2 - y) / 1.2)) * 0.6 + rand() * 0.12;
+    const k = Math.min(1, Math.max(0, (1.2 - y) / 1.2)) * amount + rand() * 0.12;
     for (let j = i; j < i + 3; j++) {
       col.setXYZ(j, col.getX(j) + (MUD[0] - col.getX(j)) * k, col.getY(j) + (MUD[1] - col.getY(j)) * k, col.getZ(j) + (MUD[2] - col.getZ(j)) * k);
+    }
+  }
+  col.needsUpdate = true;
+  return geo;
+}
+
+// Improvised winter whitewash: patchy white paint, more on the upper surfaces, the old paint and
+// mud showing through below and at the edges of the patches
+const WHITE = [0.78, 0.8, 0.8];
+function applyWhitewash(geo, seed) {
+  const pos = geo.attributes.position;
+  const col = geo.attributes.color;
+  const rand = mulberry32(seed);
+  for (let i = 0; i < pos.count; i += 3) {
+    const x = pos.getX(i);
+    const y = pos.getY(i);
+    const z = pos.getZ(i);
+    const patch = Math.sin(x * 2.1 + seed) * Math.sin(z * 1.7 - y * 2.3) + 0.4 * Math.sin(x * 5.3 + z * 4.1);
+    const k = (patch + Math.min(1, y / 1.5) * 0.9 > 0.15 ? 0.85 : 0.15) * (0.85 + rand() * 0.15);
+    for (let j = i; j < i + 3; j++) {
+      col.setXYZ(j, col.getX(j) + (WHITE[0] - col.getX(j)) * k, col.getY(j) + (WHITE[1] - col.getY(j)) * k, col.getZ(j) + (WHITE[2] - col.getZ(j)) * k);
     }
   }
   col.needsUpdate = true;
@@ -128,13 +151,21 @@ const WRECK_LOSS = {
 
 // Paint variants (multiplied with the vertex colours): olive, dark green, sand, grey, brown
 const CAMO_TINTS = [[1, 1, 1], [0.85, 0.92, 0.82], [1.12, 1.02, 0.82], [0.95, 0.96, 0.97], [1.05, 0.93, 0.8]];
-const NET_COLORS = [[74, 86, 46], [92, 98, 54], [104, 94, 62], [62, 72, 40], [118, 110, 72], [84, 70, 48]];
+// Net garnish per season (winter nets are white/grey, autumn ochre/brown)
+const NET_COLORS = {
+  summer: [[74, 86, 46], [92, 98, 54], [104, 94, 62], [62, 72, 40], [118, 110, 72], [84, 70, 48]],
+  spring: [[70, 92, 44], [86, 104, 52], [60, 80, 38], [96, 110, 60], [78, 88, 48], [92, 96, 56]],
+  autumn: [[112, 92, 52], [128, 100, 56], [96, 78, 46], [84, 82, 46], [140, 112, 64], [104, 70, 40]],
+  winter: [[200, 204, 206], [176, 180, 182], [214, 216, 218], [150, 152, 150], [188, 190, 186], [120, 122, 116]],
+};
 const CANOPY_SHADE = 0.5; // brightness of a vehicle under tree crowns
 const NET_SHADE = 0.7;
+const NET_FLAT = 0.07; // vertical scale of a net lying on the ground
 const NET_TILE = 1.6; // m of net per texture repeat
 
 // Camo net texture: diagonal cord grid with leaf-shaped garnish; transparent between (alphaTest)
-function createNetTexture() {
+function createNetTexture(season) {
+  const palette = NET_COLORS[season] ?? NET_COLORS.summer;
   const N = 256;
   const rand = mulberry32(5);
   const data = new Uint8Array(N * N * 4);
@@ -147,7 +178,7 @@ function createNetTexture() {
   };
   for (let y = 0; y < N; y++) {
     for (let x = 0; x < N; x++) {
-      if ((x + y) % 18 < 2 || (x - y + N * 4) % 18 < 2) set(x, y, [40, 42, 30]); // cords
+      if ((x + y) % 18 < 2 || (x - y + N * 4) % 18 < 2) set(x, y, season === 'winter' ? [120, 122, 118] : [40, 42, 30]); // cords
     }
   }
   for (let k = 0; k < 1300; k++) {
@@ -156,7 +187,7 @@ function createNetTexture() {
     const rx = 3 + rand() * 6;
     const ry = 2 + rand() * 4;
     const a = rand() * Math.PI;
-    const col = NET_COLORS[Math.floor(rand() * NET_COLORS.length)];
+    const col = palette[Math.floor(rand() * palette.length)];
     const shade = 0.8 + rand() * 0.35;
     const c = [col[0] * shade, col[1] * shade, col[2] * shade];
     for (let dy = -rx; dy <= rx; dy++) {
@@ -220,7 +251,8 @@ function buildNet(half, parts, rand) {
 }
 
 // Pile of cut branches on the roof and hanging over the sides: leaf clumps (fresh and dried) + sticks
-function buildBranches(half, parts, rand) {
+function buildBranches(half, parts, rand, season) {
+  const dryShare = { spring: 0.3, summer: 0.4, autumn: 0.8, winter: 0.95 }[season] ?? 0.4;
   const pieces = [];
   const tops = parts.filter((p) => !p.zone); // not on thin gun barrels
   const area = tops.map((p) => p.h[0] * p.h[2]);
@@ -230,15 +262,17 @@ function buildBranches(half, parts, rand) {
     for (let k = 0; k < tops.length; k++) if ((t -= area[k]) <= 0) return tops[k];
     return tops[0];
   };
-  const count = Math.round(18 + total * 2.2);
+  const count = Math.round((18 + total * 2.2) * (season === 'winter' ? 0.6 : 1));
   for (let k = 0; k < count; k++) {
     const p = pickPart();
     const side = rand() < 0.3; // hanging over a side
     const lx = side ? Math.sign(rand() - 0.5) * (p.h[0] + 0.05) : p.c[0] + (rand() - 0.5) * 2 * p.h[0];
     const lz = p.c[2] + (rand() - 0.5) * 2 * p.h[2];
     const ly = p.c[1] + p.h[1] + (side ? -0.35 - rand() * 0.4 : 0.05 + rand() * 0.15);
-    const dry = rand() < 0.4;
-    const color = dry ? new THREE.Color(0.36 + rand() * 0.06, 0.3 + rand() * 0.05, 0.2).getHex() : new THREE.Color().setHSL(0.21 + rand() * 0.06, 0.3, 0.15 + rand() * 0.06).getHex();
+    const dry = rand() < dryShare;
+    const color = dry
+      ? season === 'autumn' ? new THREE.Color().setHSL(0.05 + rand() * 0.07, 0.45, 0.22 + rand() * 0.08).getHex() : new THREE.Color(0.36 + rand() * 0.06, 0.3 + rand() * 0.05, 0.2).getHex()
+      : new THREE.Color().setHSL(0.21 + rand() * 0.06, 0.3, 0.15 + rand() * 0.06).getHex();
     const geo = new THREE.IcosahedronGeometry(1, 0).scale(0.45 + rand() * 0.45, side ? 0.45 + rand() * 0.3 : 0.2 + rand() * 0.2, 0.45 + rand() * 0.45);
     pieces.push({ geo, color, pos: [lx, ly, lz], rotY: rand() * Math.PI });
   }
@@ -261,27 +295,32 @@ export function createVehicles(group, layout, colliders, effects) {
   const charred = new THREE.MeshLambertMaterial({ vertexColors: true, color: 0x55504a, flatShading: true });
   const rusted = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   const scorchMat = new THREE.MeshLambertMaterial({ color: 0x2a2621, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 });
+  scorchMat.defines = { FPV_NO_SNOW: '' };
   const scorchGeo = new THREE.CircleGeometry(1, 12).rotateX(-Math.PI / 2);
   const wreckGeos = [];
   let dust = true;
-  const netMaterial = new THREE.MeshLambertMaterial({ map: createNetTexture(), alphaTest: 0.5, side: THREE.DoubleSide });
+  const season = layout.season ?? 'summer';
+  const mud = SEASON_MUD[season] ?? 0.6;
+  const netMaterial = new THREE.MeshLambertMaterial({ map: createNetTexture(season), alphaTest: 0.5, side: THREE.DoubleSide });
   const branchMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   const geometries = {};
   const vehicles = [];
 
-  // geo: whole vehicle; hull/turret: separate (wrecks lose the turret)
-  const geometryOf = (type) => {
-    if (!geometries[type]) {
+  // geo: whole vehicle; hull/turret: separate (wrecks lose the turret). white: winter whitewash variant
+  const geometryOf = (type, white = false) => {
+    const key = white ? `${type}:white` : type;
+    if (!geometries[key]) {
       const def = VEHICLE_MODELS[type]();
-      geometries[type] = {
-        geo: applyGrime(mergeParts(def.turret ? [...def.parts, ...def.turret] : def.parts), type.length),
-        hull: def.turret ? applyGrime(mergeParts(def.parts), 7) : null,
+      const geo = applyGrime(mergeParts(def.turret ? [...def.parts, ...def.turret] : def.parts), type.length, mud);
+      geometries[key] = {
+        geo: white ? applyWhitewash(geo, type.length + 3) : geo,
+        hull: def.turret ? applyGrime(mergeParts(def.parts), 7, mud) : null,
         turret: def.turret ? mergeParts(def.turret) : null,
         size: def.size,
         parts: def.colliders,
       };
     }
-    return geometries[type];
+    return geometries[key];
   };
   const shadowed = (mesh) => {
     mesh.castShadow = true;
@@ -290,7 +329,8 @@ export function createVehicles(group, layout, colliders, effects) {
   };
 
   const add = (type, extra) => {
-    const { geo, size, parts } = geometryOf(type);
+    const white = !!extra.home?.white && type !== 'ammo';
+    const { geo, size, parts } = geometryOf(type, white);
     const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
     const mesh = shadowed(new THREE.Mesh(geo, material));
     mesh.rotation.order = 'YXZ';
@@ -302,7 +342,7 @@ export function createVehicles(group, layout, colliders, effects) {
       enemy: true,
       mesh,
       material,
-      tint: CAMO_TINTS[Math.floor(rand() * CAMO_TINTS.length)],
+      tint: white ? [1, 1, 1] : CAMO_TINTS[Math.floor(rand() * CAMO_TINTS.length)],
       shade: 1,
       half: { x: size[0] / 2, y: size[1] / 2, z: size[2] / 2 },
       length: size[2],
@@ -356,7 +396,7 @@ export function createVehicles(group, layout, colliders, effects) {
       group.add(v.netMesh);
     } else if (p.branches) {
       // rides on the vehicle (child mesh), burns with it
-      v.branchMesh = shadowed(new THREE.Mesh(buildBranches(v.half, v.parts, rand), branchMaterial));
+      v.branchMesh = shadowed(new THREE.Mesh(buildBranches(v.half, v.parts, rand, season), branchMaterial));
       v.mesh.add(v.branchMesh);
     }
   }
@@ -364,8 +404,6 @@ export function createVehicles(group, layout, colliders, effects) {
   for (const cfg of layout.moving) {
     add(cfg.type, { moving: true, home: cfg, route: routes[cfg.route], patrolSpeed: cfg.speed });
   }
-  const driverCtx = { heightAt, colliders, sampleRoute, coverPoints: layout.coverPoints, half: layout.half };
-  for (const v of vehicles) if (v.type !== 'ammo') v.driver = createDriver(v, driverCtx);
 
   // Burnt-out wrecks: scenery that looks like a target but isn't. Rusted, often missing parts
   // (turret, canvas, wheels, tracks...). Colliders come only from the parts that are still there.
@@ -425,15 +463,25 @@ export function createVehicles(group, layout, colliders, effects) {
     }
   }
 
+  // Drivability grid after all static colliders exist (wrecks included)
+  const nav = createNavGrid(layout, colliders);
+  const driverCtx = { heightAt, colliders, sampleRoute, coverPoints: layout.coverPoints, half: layout.half, nav };
+  for (const v of vehicles) if (v.type !== 'ammo') v.driver = createDriver(v, driverCtx);
+
   let shadeTimer = 0;
   // threat: the drone ({ position }) or null; reactions: enemy reaction enabled; alertness: detection multiplier
   function update(dt, threat = null, reactions = true, alertness = 1) {
     shadeTimer -= dt;
     const reshade = shadeTimer <= 0;
     if (reshade) shadeTimer = 0.25;
+    nav.budget = 1; // one path plan per frame across all vehicles
     for (const v of vehicles) {
       if (v.driver) v.driver.update(dt, threat, reactions, alertness);
       if (v.driver) place(v);
+      // the net collapses onto the ground once the vehicle has driven out from under it
+      if (v.netMesh && v.netMesh.scale.y > NET_FLAT && (v.netMesh.scale.y < 1 || Math.hypot(v.x - v.home.x, v.z - v.home.z) > v.half.z * 0.9)) {
+        v.netMesh.scale.y = Math.max(NET_FLAT, v.netMesh.scale.y - dt * 0.8);
+      }
       // Dust kicked up behind fast vehicles
       if (dust && effects && Math.abs(v.speed ?? 0) > DUST_SPEED) {
         v.dustTimer -= dt;
@@ -458,6 +506,7 @@ export function createVehicles(group, layout, colliders, effects) {
       v.state = 'intact';
       v.mesh.material = v.material;
       if (v.branchMesh) v.branchMesh.material = branchMaterial;
+      if (v.netMesh) v.netMesh.scale.y = 1;
       if (v.driver) v.driver.reset(v.home);
       else {
         v.x = v.home.x;
@@ -537,6 +586,32 @@ export function createVehicles(group, layout, colliders, effects) {
     }
   }
 
+  // Endless Hunt: the destroyed vehicle stays as a burning wreck (static colliders for its parts) and
+  // a fresh one of the same type takes its place at home. A map rebuild clears these wrecks.
+  const tmpV = new THREE.Vector3();
+  function respawn(v) {
+    const old = v.mesh;
+    old.updateMatrix();
+    for (const part of v.parts) {
+      tmpV.set(...part.c).applyMatrix4(old.matrix);
+      colliders.addOBB('wreck', tmpV.x, tmpV.y, tmpV.z, part.h[0], part.h[1], part.h[2], v.yaw);
+    }
+    const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
+    const mesh = shadowed(new THREE.Mesh(old.geometry, material));
+    mesh.rotation.order = 'YXZ';
+    group.add(mesh);
+    v.mesh = mesh;
+    if (old.material !== v.material) v.material.dispose(); // the wreck keeps the charred one
+    v.material = material;
+    v.branchMesh = null; // the branches burnt with the old one
+    v.netMesh = null; // the net lies flat where it fell
+    v.state = 'intact';
+    v.driver?.reset(v.home);
+    place(v);
+    v.shade = underCanopy(v) ? CANOPY_SHADE : 1;
+    applyColor(v);
+  }
+
   function dispose() {
     for (const v of vehicles) {
       v.material.dispose();
@@ -555,7 +630,7 @@ export function createVehicles(group, layout, colliders, effects) {
   }
 
   return {
-    list: vehicles, update, reset, hits, distanceTo, damage, dispose,
+    list: vehicles, update, reset, hits, distanceTo, damage, respawn, dispose,
     setDust(on) {
       dust = on;
     },

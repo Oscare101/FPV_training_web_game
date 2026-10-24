@@ -9,22 +9,30 @@ import { createEffects } from './effects.js';
 import { createGrass } from './grass.js';
 import { createChunks, disposeTree } from './chunks.js';
 import { StaticColliders } from './colliders.js';
-import { flatMaterial } from './meshUtils.js';
+import { flatMaterial, mergeParts } from './meshUtils.js';
 import { mulberry32 } from './random.js';
 import { createCameraFx } from '../render/CameraFx.js';
+import { installEnvShade, setDroneShadow, setSurface } from '../render/envShade.js';
+import { createWater } from './water.js';
+import { createPrecip } from './precip.js';
+import { createDroneModel } from './droneModel.js';
 
 const CHUNK_SIZE = 256; // m, multiple of every terrain cell size
 const CAMERA_OFFSET = new THREE.Vector3(0, 0.03, -0.08); // body frame: slightly up, at the nose
 const OBSERVER_FOV = 55; // deg vertical, "second drone" filming the strike
+const MENU_FOV = 38; // deg vertical, main menu close-up of the drone
+const MENU = { distance: 1.05, height: 0.1, swing: 0.6, shift: 0.17, hover: 1.6 }; // camera m at 5", swing rad around the sun side; drone shown left of centre
 const OBSERVER_DISTANCE = 28;
 const OBSERVER_HEIGHT = 12;
 const OBSERVER_ORBIT = 0.12; // rad/s
-const NIGHT_VIEW = 320; // m, max render distance at night
-const SHADE_OPACITY = { shadowsOff: 0.32, shadowsOn: 0.14 }; // fake crown shade, lighter when real shadows exist
+// Fake crown shade under trees: a soft blob. With real shadows it stays faint (ambient occlusion) where the
+// shadow map reaches and fades to full strength beyond it, where trees have no real shadow.
+const SHADE = { opacity: 0.4, nearWithShadows: 0.3 };
+const PREVIEW = { orbitDistance: 9, orbitHeight: 3.5, orbitSpeed: 0.25, aboveBack: 45, aboveHeight: 55, aboveAhead: 60 };
 
 // Flat ground around the map, as a ring so it never overlaps (and z-fights) the
 // terrain. The terrain is flattened to y = 0 at its edges, so the seam is closed.
-function createOuterGround(inner, outer) {
+function createOuterGround(inner, outer, color) {
   const h = inner / 2;
   const o = outer / 2;
   const strip = (x0, x1, z0, z1) =>
@@ -35,7 +43,8 @@ function createOuterGround(inner, outer) {
     strip(-o, -h, -h, h), // west
     strip(h, o, -h, h), // east
   ]);
-  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color: 0x4f5a30 }));
+  const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ color }));
+  mesh.material.defines = { FPV_NO_SNOW: '' };
   mesh.receiveShadow = true;
   return mesh;
 }
@@ -112,8 +121,26 @@ function createBladeTexture() {
 
 // Lambert terrain + world-space dirt texture that fades out with distance, and optional flat
 // grass painted from the grass colour/density map (no geometry: the cheap grass mode)
+function patchShadeMaterial(material) {
+  const uniforms = { shadeNear: { value: 1 }, shadeFadeStart: { value: 1e5 }, shadeFadeEnd: { value: 2e5 } };
+  material.onBeforeCompile = (shader) => {
+    Object.assign(shader.uniforms, uniforms);
+    shader.vertexShader = shader.vertexShader
+      .replace('#include <common>', '#include <common>\nvarying float vRadial;\nvarying float vShadeDist;')
+      .replace('#include <project_vertex>', `#include <project_vertex>
+        vRadial = length(position.xz);
+        vShadeDist = length((modelMatrix * instanceMatrix * vec4(transformed, 1.0)).xyz - cameraPosition);`);
+    shader.fragmentShader = shader.fragmentShader
+      .replace('#include <common>', '#include <common>\nvarying float vRadial;\nvarying float vShadeDist;\nuniform float shadeNear, shadeFadeStart, shadeFadeEnd;')
+      .replace('#include <color_fragment>', `#include <color_fragment>
+        diffuseColor.a *= (1.0 - smoothstep(0.25, 1.0, vRadial)) * mix(shadeNear, 1.0, smoothstep(shadeFadeStart, shadeFadeEnd, vShadeDist));`);
+  };
+  material.userData.uniforms = uniforms;
+}
+
 function createTerrainMaterial() {
   const material = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true, side: THREE.DoubleSide });
+  material.defines = { FPV_NO_SNOW: '' }; // snow cover is in the ground colours
   const uniforms = {
     detailMap: { value: createDetailTexture() },
     detailStrength: { value: 1 },
@@ -152,6 +179,7 @@ function createTerrainMaterial() {
 }
 
 export function createWorld(container) {
+  installEnvShade(); // before any material compiles
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
   renderer.setSize(window.innerWidth, window.innerHeight);
@@ -168,6 +196,7 @@ export function createWorld(container) {
   const terrainMaterial = createTerrainMaterial();
   const structureMaterial = flatMaterial();
   const vegetationMaterials = createVegetationMaterials();
+  patchShadeMaterial(vegetationMaterials.shade);
   const shared = new Set([terrainMaterial, structureMaterial, ...Object.values(vegetationMaterials)]);
 
   // Current map; replaced by build()
@@ -181,6 +210,14 @@ export function createWorld(container) {
   let dynamicGroup = null;
   let outer = null;
   const effects = createEffects(scene, (x, z) => (layout ? layout.heightAt(x, z) : 0));
+  const droneModel = createDroneModel();
+  const droneMesh = droneModel.group;
+  scene.add(droneMesh);
+  let vehiclesOn = true;
+  let menuView = false;
+  const menuPose = { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
+  const menuBase = { layout: null, size: 0, a: 0 }; // clear camera angle for this map
+  const menuRight = new THREE.Vector3();
 
   // Camera + settings state
   const uptilt = new THREE.Quaternion();
@@ -188,14 +225,19 @@ export function createWorld(container) {
   let fovH = 120;
   let renderDistance = 700;
   let detailDistance = 220;
-  let night = false;
+  let env = null;
+  let season = 'summer';
+  let water = null;
+  const precip = createPrecip(scene);
+  const prevCam = new THREE.Vector3();
+  const camVel = new THREE.Vector3();
   let observing = false;
   let graphics = null;
   const flightState = { wind: new THREE.Vector3(), wash: { position: new THREE.Vector3(0, -1000, 0), strength: 0 } };
   const updateProjection = () => {
     const aspect = window.innerWidth / window.innerHeight;
     camera.aspect = aspect;
-    camera.fov = observing ? OBSERVER_FOV : (2 * Math.atan(Math.tan((fovH * Math.PI) / 360) / aspect) * 180) / Math.PI;
+    camera.fov = menuView ? MENU_FOV : observing ? OBSERVER_FOV : (2 * Math.atan(Math.tan((fovH * Math.PI) / 360) / aspect) * 180) / Math.PI;
     camera.updateProjectionMatrix();
   };
   updateProjection();
@@ -212,14 +254,15 @@ export function createWorld(container) {
     root.traverse((o) => {
       if (!o.isMesh || o.material === terrainMaterial) return;
       const shade = o.material === vegetationMaterials.shade;
-      o.castShadow = !shade && !o.material.polygonOffset;
+      o.castShadow = !shade && !o.material.polygonOffset && !o.material.userData.noCastShadow;
       o.receiveShadow = !shade;
     });
   }
 
   function clear() {
     if (!layout) return;
-    scene.remove(chunks.root, dynamicGroup, outer, grass.mesh);
+    scene.remove(chunks.root, dynamicGroup, outer, grass.mesh, water.mesh);
+    water.dispose();
     disposeTree(chunks.root, shared);
     disposeTree(outer);
     vehicles.dispose();
@@ -231,6 +274,7 @@ export function createWorld(container) {
   return {
     scene,
     camera,
+    renderer,
     get layout() {
       return layout;
     },
@@ -244,6 +288,17 @@ export function createWorld(container) {
     },
     heightAt(x, z) {
       return layout.heightAt(x, z);
+    },
+    // Projected point (NDC) -> where it shows on screen through the FPV lens distortion
+    lensWarp(x, y, out) {
+      return fx.toScreen(x, y, out);
+    },
+    // Water surface where the ground is below it (null if dry); frozen water is solid ground
+    waterAt(x, z) {
+      return layout.waterAt(x, z);
+    },
+    get waterFrozen() {
+      return layout.water.frozen;
     },
 
     // Replace the whole map with a new layout. vegDetail: 'low' | 'medium' | 'high'
@@ -265,15 +320,27 @@ export function createWorld(container) {
 
       dynamicGroup = new THREE.Group();
       vehicles = createVehicles(dynamicGroup, layout, colliders, effects);
+      dynamicGroup.visible = vehiclesOn;
       scene.add(dynamicGroup);
 
+      water = createWater(layout);
+      scene.add(water.mesh);
       grass = createGrass(layout);
       scene.add(grass.mesh);
       terrainMaterial.userData.uniforms.grassColorMap.value = grass.colorTex;
       terrainMaterial.userData.uniforms.mapHalf.value = layout.half;
       terrainMaterial.userData.uniforms.mapSize.value = layout.size;
 
-      outer = createOuterGround(layout.size, layout.size * 4);
+      // colour of the flat ground outside: average of the map's edge, so no band shows (snow in winter)
+      const edgeCol = new THREE.Color(0, 0, 0);
+      const c = new THREE.Color();
+      for (let k = 0; k < 64; k++) {
+        const t = (k % 16) / 16 * layout.size - layout.half;
+        const e = layout.half - 8;
+        const [x, z] = [[t, -e], [t, e], [-e, t], [e, t]][k >> 4];
+        edgeCol.add(layout.groundColor(x, z, c));
+      }
+      outer = createOuterGround(layout.size, layout.size * 4, edgeCol.multiplyScalar(1 / 64));
       scene.add(outer);
       if (graphics) this.applyGraphics();
     },
@@ -281,25 +348,43 @@ export function createWorld(container) {
     // First obstacle touching the sphere: { kind: 'tree' | 'bush' | 'building' | 'pole' | 'wreck' }
     // or { kind: 'vehicle', vehicle, zone, effect }; null if clear. Ground is handled by the caller.
     hitTest(p, r) {
-      return colliders.hits(p, r) || vehicles.hits(p, r);
+      return colliders.hits(p, r) || (vehiclesOn ? vehicles.hits(p, r) : null);
     },
 
-    applySettings({ camera: cam, env, map, graphics: g }) {
+    // Free Flight without enemies: vehicles hidden, not hittable, not driving
+    setVehiclesEnabled(on) {
+      vehiclesOn = on;
+      if (dynamicGroup) dynamicGroup.visible = on;
+    },
+
+    applySettings({ camera: cam, env: settingsEnv, map, graphics: g }) {
       uptilt.setFromAxisAngle(new THREE.Vector3(1, 0, 0), (cam.uptilt * Math.PI) / 180);
       fovH = cam.fov;
       updateProjection();
       renderDistance = map.renderDistance;
       detailDistance = map.detailDistance;
       renderer.setPixelRatio(Math.min(window.devicePixelRatio, map.renderScale));
-      night = env.night;
+      env = settingsEnv;
+      season = map.season;
       graphics = g;
       this.applyGraphics();
     },
 
     applyGraphics() {
       const g = graphics;
-      sky.apply({ night, viewDistance: night ? Math.min(renderDistance, NIGHT_VIEW) : renderDistance, clouds: g.clouds, shadows: g.shadows });
-      vegetationMaterials.shade.opacity = sky.shadowsOn ? SHADE_OPACITY.shadowsOn : SHADE_OPACITY.shadowsOff;
+      sky.apply({
+        season, timeOfDay: env.timeOfDay, hour: env.hour, latitude: env.latitude, clouds: g.clouds, cloudShadows: g.cloudShadows,
+        fog: env.fog, rain: env.rain, snowfall: env.snowfall, viewDistance: renderDistance, shadows: g.shadows,
+      });
+      const light = 1 - sky.state.dark * 0.8;
+      precip.configure(env.rain, env.snowfall, light);
+      setSurface(season === 'winter' ? 0.85 : env.snowfall * 0.5, env.rain * 0.9);
+      const shade = vegetationMaterials.shade;
+      const ext = sky.shadowExtent;
+      shade.opacity = SHADE.opacity;
+      shade.userData.uniforms.shadeNear.value = ext ? SHADE.nearWithShadows : 1;
+      shade.userData.uniforms.shadeFadeStart.value = ext ? ext * 0.55 : 1e5;
+      shade.userData.uniforms.shadeFadeEnd.value = ext ? ext * 0.95 : 2e5;
       terrainMaterial.userData.uniforms.detailStrength.value = g.groundTexture;
       fx.configure(g);
       // grass: 'off' | 'flat' (painted on the ground) | '3d' (blades + painted ground under them)
@@ -315,9 +400,21 @@ export function createWorld(container) {
       flightState.wash.strength = washStrength;
     },
 
+    // Drone shadow on the ground: pose { position, quaternion } or null; size in prop inches; spin 0..1
+    setDrone(pose, size, spin, payload = false) {
+      setDroneShadow(graphics?.droneShadow ? pose : null, size, spin, 0.85 - sky.state.dark * 0.25);
+      droneMesh.visible = observing && !!pose;
+      if (pose) {
+        droneMesh.position.copy(pose.position);
+        droneMesh.quaternion.copy(pose.quaternion);
+        droneMesh.scale.setScalar(size / 5);
+        droneModel.update(1 / 60, spin, payload);
+      }
+    },
+
     // threat: the drone ({ position }) when it can be seen, else null
     update(dt, threat, reactions, alertness) {
-      vehicles.update(dt, threat, reactions, alertness);
+      if (vehiclesOn) vehicles.update(dt, threat, reactions, alertness);
       effects.update(dt);
     },
 
@@ -325,6 +422,7 @@ export function createWorld(container) {
     updateCamera(pose) {
       if (observing) {
         observing = false;
+        menuView = false;
         updateProjection();
       }
       offset.copy(CAMERA_OFFSET).applyQuaternion(pose.quaternion);
@@ -334,8 +432,9 @@ export function createWorld(container) {
 
     // Slow orbit around a point, starting behind `fromDir` (the strike's approach direction)
     updateObserverCamera(center, fromDir, t) {
-      if (!observing) {
+      if (!observing || menuView) {
         observing = true;
+        menuView = false;
         updateProjection();
       }
       const a = Math.atan2(-fromDir.x, -fromDir.z) + t * OBSERVER_ORBIT;
@@ -345,9 +444,80 @@ export function createWorld(container) {
       camera.lookAt(center);
     },
 
+    // Main menu: the drone hovers over the launch pad, the camera circles it close up with the drone
+    // left of centre (the menu panel is on the right). Returns the drone pose to draw.
+    updateMenuCamera(t, size) {
+      const k = size / 5;
+      if (!menuView || !observing) {
+        menuView = true;
+        observing = true;
+        updateProjection();
+      }
+      const l = layout.launch;
+      const g = layout.heightAt(l.x, l.z);
+      menuPose.position.set(l.x, g + MENU.hover + Math.sin(t * 1.3) * 0.03, l.z);
+      // camera on the sun's side (the drone is lit, never a silhouette) where nothing blocks the view
+      if (menuBase.layout !== layout || menuBase.size !== size) {
+        const sun = sky.colors.sunDir;
+        const a0 = Math.atan2(sun.x, sun.z);
+        const p = new THREE.Vector3();
+        menuBase.a = a0;
+        for (const off of [0, 0.35, -0.35, 0.7, -0.7, 1.05, -1.05, 1.4, -1.4, 1.75, -1.75]) {
+          const a = a0 + off;
+          let clear = true;
+          for (const f of [0.35, 0.7, 1, 1.4]) {
+            p.set(l.x + Math.sin(a) * MENU.distance * k * f, menuPose.position.y + MENU.height * k * f, l.z + Math.cos(a) * MENU.distance * k * f);
+            if (colliders.hits(p, 0.3 * k) || p.y < layout.heightAt(p.x, p.z) + 0.2) clear = false;
+          }
+          if (clear) {
+            menuBase.a = a;
+            break;
+          }
+        }
+        menuBase.layout = layout;
+        menuBase.size = size;
+      }
+      const a = menuBase.a + Math.sin(t * 0.1) * MENU.swing * 0.5;
+      // nose turned three-quarters towards the camera
+      menuPose.quaternion.setFromEuler(new THREE.Euler(Math.sin(t * 0.9) * 0.03, menuBase.a + Math.PI - 0.65 + Math.sin(t * 0.25) * 0.15, Math.sin(t * 0.7) * 0.04, 'YXZ'));
+      camera.position.set(l.x + Math.sin(a) * MENU.distance * k, menuPose.position.y + MENU.height * k, l.z + Math.cos(a) * MENU.distance * k);
+      menuRight.set(Math.cos(a), 0, -Math.sin(a)); // camera's right
+      camera.lookAt(observerOffset.copy(menuPose.position).addScaledVector(menuRight, MENU.shift * k));
+      return menuPose;
+    },
+
+    // Settings preview: 'orbit' circles the drone, 'above' looks over it towards where it faces
+    updatePreviewCamera(mode, pose, t) {
+      if (!observing || menuView) {
+        observing = true;
+        menuView = false;
+        updateProjection();
+      }
+      const p = pose.position;
+      if (mode === 'orbit') {
+        const a = t * PREVIEW.orbitSpeed;
+        camera.position.set(p.x + Math.sin(a) * PREVIEW.orbitDistance, p.y + PREVIEW.orbitHeight, p.z + Math.cos(a) * PREVIEW.orbitDistance);
+        observerOffset.copy(p);
+      } else {
+        observerOffset.set(0, 0, -1).applyQuaternion(pose.quaternion).setY(0);
+        if (observerOffset.lengthSq() < 1e-4) observerOffset.set(0, 0, -1);
+        observerOffset.normalize();
+        camera.position.copy(p).addScaledVector(observerOffset, -PREVIEW.aboveBack);
+        camera.position.y = p.y + PREVIEW.aboveHeight;
+        observerOffset.multiplyScalar(PREVIEW.aboveAhead).add(p);
+      }
+      camera.position.y = Math.max(camera.position.y, layout.heightAt(camera.position.x, camera.position.z) + 1.5);
+      camera.lookAt(observerOffset);
+    },
+
     render(dt = 0) {
       sky.follow(camera, dt);
-      chunks.update(camera, night ? Math.min(renderDistance, NIGHT_VIEW) : renderDistance);
+      chunks.update(camera, Math.min(renderDistance, sky.state.viewDistance + 30)); // nothing past the fog
+      if (dt > 0) camVel.subVectors(camera.position, prevCam).divideScalar(dt);
+      if (camVel.lengthSq() > 1e4) camVel.set(0, 0, 0); // camera jumped
+      prevCam.copy(camera.position);
+      precip.update(camera, dt, flightState.wind, camVel, fx.height, (camera.fov * Math.PI) / 180);
+      water.update(dt, sky.colors);
       terrain.update(camera, detailDistance);
       vegetation.update(camera, detailDistance);
       grass.update(camera, dt, flightState.wind, flightState.wash);

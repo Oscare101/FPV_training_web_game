@@ -21,7 +21,7 @@ export function createEffects(scene, heightAt) {
 
   const smoke = new THREE.InstancedMesh(
     new THREE.IcosahedronGeometry(1, 0),
-    new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true, transparent: true, opacity: 0.8, depthWrite: false }),
+    Object.assign(new THREE.MeshLambertMaterial({ color: 0xffffff, flatShading: true, transparent: true, opacity: 0.8, depthWrite: false }), { defines: { FPV_NO_SNOW: '' } }),
     MAX_PUFFS
   );
   smoke.frustumCulled = false;
@@ -32,6 +32,7 @@ export function createEffects(scene, heightAt) {
 
   const scorchGeo = new THREE.CircleGeometry(1, 12).rotateX(-Math.PI / 2);
   const scorchMat = new THREE.MeshLambertMaterial({ color: 0x1e1c18, polygonOffset: true, polygonOffsetFactor: -2 });
+  scorchMat.defines = { FPV_NO_SNOW: '' };
   const scorches = [];
 
   const emitters = []; // burning vehicles: { target: Object3D, rate, acc, until }
