@@ -37,7 +37,7 @@ export class PauseMenu {
     const free = mode === 'free';
     const items = [
       ['resume', 'Resume', true],
-      ['restart', { free: 'Drone back to the pad', strike: 'Retry mission', hunt: 'Restart the hunt' }[mode]],
+      ['restart', { free: 'Drone back to the pad', strike: 'Retry mission', hunt: 'Restart the hunt', hide: 'Retry this hideout' }[mode]],
       ...(free && enemies ? [['reset-enemies', 'Reset enemies']] : []),
       ...(free ? [['free-setup', 'Map, weather & enemies']] : []),
       ['settings', 'Settings'],

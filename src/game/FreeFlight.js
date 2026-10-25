@@ -63,7 +63,7 @@ export class FreeFlight {
   }
 
   handleImpact(hit, drone) {
-    if (!this.liveCharge || !this.chargeArmed || this.state !== 'flying' || !fuseTriggered(hit)) return false;
+    if (!this.liveCharge || !this.chargeArmed || this.state !== 'flying' || !fuseTriggered(hit, drone)) return false;
     this.blast(hit, drone);
     return true;
   }

@@ -80,6 +80,7 @@ export class GameHud {
   }
 
   end(now) {
+    if (this.used.has('briefing')) this.used.delete('hint'); // they share the top of the screen
     for (const k of ['briefing', 'stats', 'hint', 'hud', 'marker', 'static', 'signal', 'result']) this.el[k].hidden = !this.used.has(k);
     this.el.banner.hidden = now > this.bannerUntil;
     // kill feed: fade out after 4 s

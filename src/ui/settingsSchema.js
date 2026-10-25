@@ -306,6 +306,10 @@ export const CATEGORIES = [
     ],
   },
   {
+    id: 'guide', label: 'Target guide', icon: '◈', wide: true,
+    groups: [{ title: '', custom: 'guide' }],
+  },
+  {
     id: 'audio', label: 'Audio', icon: '♪',
     groups: [
       {

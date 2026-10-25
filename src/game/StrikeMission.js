@@ -16,7 +16,7 @@ const WEAK_SPOTS = {
   ammo: 'any hit — secondary explosions',
 };
 const OBSTACLE = {
-  tree: 'a tree', bush: 'a bush', building: 'a building', pole: 'a pole', wreck: 'a burnt-out wreck', fence: 'a fence',
+  tree: 'a tree', bush: 'a bush', building: 'a building', pole: 'a pole', wreck: 'a burnt-out wreck', fence: 'a fence', net: 'a camo net',
   ground: 'the ground', water: 'the water', air: 'mid-air (manual)',
 };
 const OUTCOME = {
@@ -122,7 +122,7 @@ export class StrikeMission {
   }
 
   handleImpact(hit, drone) {
-    if (!this.chargeArmed || this.state !== 'flying' || !fuseTriggered(hit)) return false;
+    if (!this.chargeArmed || this.state !== 'flying' || !fuseTriggered(hit, drone)) return false;
     this.resolve(hit, drone);
     return true;
   }
@@ -149,10 +149,12 @@ export class StrikeMission {
       if (s?.aware) result.spotted = Math.max(result.spotted ?? 0, s.time - s.awareSince);
     }
     const blast = this.fx.detonate(hit, drone);
-    Object.assign(result, { struck: blast.struck, zone: blast.zone, obstacle: blast.obstacle, destroyed: blast.destroyed });
+    Object.assign(result, { struck: blast.struck, zone: blast.zone, obstacle: blast.obstacle, destroyed: blast.destroyed, others: blast.changed.filter((v) => v.enemy && v !== this.target) });
     if (easy) {
+      const otherHit = blast.changed.some((v) => v.enemy && v !== this.target);
       if (blast.struck && blast.struck !== this.target) result.outcome = 'wrong';
-      else result.outcome = this.target.state === 'intact' ? 'miss' : this.target.state;
+      else if (this.target.state === 'intact') result.outcome = otherHit ? 'wrong' : 'miss';
+      else result.outcome = this.target.state;
       result.focus = this.target;
     } else {
       const hitEnemies = blast.changed.filter((v) => v.enemy);
@@ -252,7 +254,9 @@ export class StrikeMission {
     const [title, cls] = OUTCOME[r.outcome];
     const subject = r.difficulty === 'easy' ? 'TARGET' : r.focus ? r.focus.label.toUpperCase() : 'ENEMY';
     const lines = [];
-    if (r.struck) {
+    if (r.outcome === 'wrong' && !r.struck) {
+      lines.push(`The blast hit the ${r.others.map((v) => `${v.label.toLowerCase()} (${v.state})`).join(', ')} — the target was the ${this.target.label.toLowerCase()}`);
+    } else if (r.struck) {
       lines.push(r.outcome === 'wrong'
         ? `Hit a ${r.struck.label.toLowerCase()} (${r.struck.state}) — the target was the ${this.target.label.toLowerCase()}`
         : `${r.struck.label}: ${r.zone} hit`);

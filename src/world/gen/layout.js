@@ -1115,6 +1115,30 @@ export function generateLayout(seed, options = {}) {
     }
   }
 
+  // Hide & Seek: one parked vehicle in a hideout, 110-220 m from launch, roughly towards the enemy side
+  if (o.hideSeek) {
+    const hs = o.hideSeek;
+    const type = hs.type ?? pickWeighted({ tank: 0.25, ifv: 0.25, apc: 0.2, truck: 0.2, car: 0.1 });
+    // strict first (ahead of the pad, flat, open ground); later attempts relax so a target always exists
+    for (let attempt = 0; attempt < 1200; attempt++) {
+      const stage = Math.floor(attempt / 300); // 0 strict, 1 any bearing, 2 rougher ground, 3 closer/farther + forest ok
+      const bearing = stage === 0 ? r(-1.1, 1.1) : r(-Math.PI, Math.PI);
+      const dist = stage < 3 ? r(o.launchMin, o.launchMax) : r(o.launchMin * 0.6, o.launchMax * 1.4);
+      const x = launch.x + Math.sin(bearing) * dist;
+      const z = launch.z - Math.cos(bearing) * dist;
+      if (!free(x, z, stage < 3 ? 10 : 7) || roadMask.get(x, z) || (stage < 3 && isForest(x, z))) continue;
+      const h0 = heightAt(x, z);
+      const flat = stage < 2 ? 1 : 1.8;
+      if ([[6, 0], [-6, 0], [0, 6], [0, -6]].some(([dx, dz]) => Math.abs(heightAt(x + dx, z + dz) - h0) > flat)) continue;
+      sites.push({ kind: 'hide', x, z, yaw: 0, items: [] });
+      const placed = { type, x, z, yaw: r(0, Math.PI * 2), net: false, branches: false, shelter: { kind: hs.shelter, difficulty: hs.difficulty }, site: sites.length - 1 };
+      parked.push(placed);
+      sites[sites.length - 1].items.push(placed);
+      occupied.push({ x, z, r: 11 });
+      break;
+    }
+  }
+
   // Burnt-out wrecks along roads in the grey zone (decor, not targets)
   const wrecks = [];
   for (let tries = 0; wrecks.length < o.wrecks && tries < 200; tries++) {
@@ -1165,7 +1189,7 @@ export function generateLayout(seed, options = {}) {
 
   // ---------- earthworks around parked vehicles: pit + U-shaped berm open at the front ----------
   for (const p of parked) {
-    if (sites[p.site].kind === 'village' || !chance(o.revetments)) continue;
+    if (p.shelter || sites[p.site].kind === 'village' || !chance(o.revetments)) continue;
     const hx = HALF_WIDTH[p.type] + 1;
     const hz = HALF_LENGTH[p.type] + 1;
     const pit = p.type === 'ammo' ? 0.5 : r(0.6, 1.1);
@@ -1313,7 +1337,7 @@ export function generateLayout(seed, options = {}) {
   }
   // Parked under a tree: a big crown right beside most hidden vehicles
   for (const p of parked) {
-    if (sites[p.site].kind === 'field' || !chance(0.75)) continue;
+    if (p.shelter || sites[p.site].kind === 'field' || !chance(0.75)) continue;
     const side = chance(0.5) ? 1 : -1;
     const off = HALF_WIDTH[p.type] + r(1.4, 2.2);
     const along = r(-1.5, 1.5);
@@ -1324,6 +1348,7 @@ export function generateLayout(seed, options = {}) {
   }
   // Bushes around enemy positions help hide them
   for (const p of parked) {
+    if (p.shelter) continue;
     for (let k = 0; k < 3; k++) {
       const a = r(0, Math.PI * 2);
       addBush(p.x + Math.cos(a) * r(5, 8), p.z + Math.sin(a) * r(5, 8), r(0.8, 1.6));

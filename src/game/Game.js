@@ -4,12 +4,14 @@ import { createStrikeFx } from './strike.js';
 import { FreeFlight } from './FreeFlight.js';
 import { StrikeMission } from './StrikeMission.js';
 import { Hunt } from './Hunt.js';
+import { HideSeek } from './HideSeek.js';
+import { SHELTERS } from '../world/shelters.js';
 
-export const MODE_NAMES = { free: 'Free Flight', strike: 'Strike Missions', hunt: 'Hunt' };
+export const MODE_NAMES = { free: 'Free Flight', strike: 'Strike Missions', hunt: 'Hunt', hide: 'Hide & Seek' };
 // Settings pages per context: free play can change anything; missions/hunt only what doesn't
 // change the game (map, weather, drone and enemies are set before starting)
-export const GLOBAL_PAGES = ['drone', 'rates', 'camera', 'hud', 'graphics', 'audio', 'controller', 'general'];
-export const LOCKED_PAGES = ['rates', 'camera', 'hud', 'graphics', 'audio', 'controller', 'general'];
+export const GLOBAL_PAGES = ['drone', 'rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
+export const LOCKED_PAGES = ['rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
 export const FREE_SETUP_PAGES = ['free', 'weather', 'map'];
 
 // The settings the world, drone and audio run on: the player's settings with the active mode's
@@ -55,7 +57,7 @@ export class Game {
     const fx = createStrikeFx(world, audio);
     this.fx = fx;
     const ctx = { flight, world, settings, fx, hud };
-    this.modes = { free: new FreeFlight(ctx), strike: new StrikeMission(ctx), hunt: new Hunt(ctx) };
+    this.modes = { free: new FreeFlight(ctx), strike: new StrikeMission(ctx), hunt: new Hunt(ctx), hide: new HideSeek(ctx) };
 
     flight.onImpact = (hit, drone) => (this.state === 'playing' ? this.active.handleImpact(hit, drone) : false);
     flight.onReset = () => {
@@ -148,18 +150,23 @@ export class Game {
       this.settings.applyPreset('7strike'); // a strike needs a charge
       notice = 'Drone switched to 7" strike (change it in Settings → Drone).';
     }
-    const conditions = mode === 'strike' && this.settings.data.strike.conditions === 'random'
+    let conditions = mode === 'strike' && this.settings.data.strike.conditions === 'random'
       ? rollStrikeConditions(this.settings.data.strike.difficulty) : null;
+    if (mode === 'hide') {
+      // mild random conditions (it's about precision, not weather), the hideout type chosen or random
+      const pick = this.settings.data.hide.shelter;
+      conditions = { ...rollStrikeConditions('easy'), shelter: SHELTERS.includes(pick) ? pick : SHELTERS[Math.floor(Math.random() * SHELTERS.length)] };
+    }
     this.setMode(mode, conditions);
-    const text = { free: 'Preparing the map…', strike: 'Preparing the mission…', hunt: 'Preparing the battlefield…' }[mode];
+    const text = { free: 'Preparing the map…', strike: 'Preparing the mission…', hunt: 'Preparing the battlefield…', hide: 'Hiding the target…' }[mode];
     this.withLoading(text, () => {
       const key = mapKeyOf(this.data.map);
-      if (mode === 'strike') this.buildMap(0); // every mission a new map
+      if (mode === 'strike' || mode === 'hide') this.buildMap(0); // every mission / hideout a new map
       else if (mode === 'hunt') this.buildMap(this.data.map.seed); // same battlefield, fresh (no wrecks)
       else if (key !== this.builtKey || this.pendingRebuild || this.lastBuiltMode !== 'free') this.buildMap(this.data.map.seed);
       this.lastBuiltMode = mode;
       this.state = 'playing';
-      if (mode === 'strike') this.active.begin(conditions, notice);
+      if (mode === 'strike' || mode === 'hide') this.active.begin(conditions, notice);
       else this.active.begin();
     });
   }
@@ -167,6 +174,7 @@ export class Game {
   // Strike: same mission again; Hunt: same battlefield from scratch; Free: drone back on the pad
   restart() {
     this.paused = false;
+    if (this.mode === 'hide') return this.pendingRebuild ? this.start('hide') : this.active.retry();
     if (this.mode === 'hunt') this.start('hunt');
     else if (this.mode === 'strike' && this.pendingRebuild) this.start('strike');
     else if (this.mode === 'strike') this.active.retry();
@@ -212,7 +220,7 @@ export class Game {
   // Result-panel buttons
   action(a) {
     if (a === 'retry' || a === 'again') this.restart();
-    if (a === 'next') this.nextMission();
+    if (a === 'next') this.start(this.mode === 'hide' ? 'hide' : 'strike');
     if (a === 'newfield') this.newBattlefield();
     if (a === 'menu') this.exitToMenu();
   }

@@ -13,6 +13,10 @@ export const HUNT_MAP = {
   wrecks: 3, lakes: 0, rivers: 1, craters: 1.2, launchSpot: 'random',
 };
 export const HUNT_WIND = 2; // m/s, same every round so times compare
+// Hide & Seek: small map, one hidden target close to the launch point, nothing else to shoot
+export const HIDE_MAP = {
+  size: 1500, launchMin: 110, launchMax: 220, enemySites: 0, movingVehicles: 0, wrecks: 2, lakes: 0, rivers: 0, launchSpot: 'field',
+};
 
 const pick = (weights, rand = Math.random) => {
   let t = rand() * Object.values(weights).reduce((a, b) => a + b, 0);
@@ -58,6 +62,15 @@ export function effectiveSettings(data, { mode, conditions }) {
     };
   }
   if (mode === 'strike') return { ...data, map: { ...MAP_DEFAULTS, ...detail, season: data.map.season } };
+  if (mode === 'hide' && conditions) {
+    const w = weatherOverrides(conditions.weather);
+    return {
+      ...data,
+      env: { ...data.env, ...w.env, weather: conditions.weather, timeOfDay: conditions.timeOfDay, windSpeed: conditions.windSpeed, windDir: conditions.windDir },
+      graphics: { ...data.graphics, ...w.graphics },
+      map: { ...MAP_DEFAULTS, ...HIDE_MAP, ...detail, season: conditions.season, hideSeek: { shelter: conditions.shelter, difficulty: data.hide.difficulty } },
+    };
+  }
   if (mode === 'hunt') {
     const h = data.hunt;
     const w = weatherOverrides(h.weather);

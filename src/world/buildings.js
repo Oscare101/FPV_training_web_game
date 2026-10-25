@@ -108,7 +108,8 @@ function house(h, y0, rand) {
         const lx = along ? sign * (h.w / 2 - 0.15) : t;
         const lz = along ? t : sign * (h.d / 2 - 0.15);
         b.box(along ? 0.3 : segLen, wh, along ? segLen : 0.3, lx, plinth + wh / 2, lz, wall);
-        b.box(along ? 0.32 : segLen, 0.35, along ? segLen : 0.32, lx, plinth + wh - 0.16, lz, SOOT, { collide: false });
+        // soot cap: clearly wider than the wall and inset at the ends, so no face is coplanar with a wall (no flicker)
+        b.box(along ? 0.38 : segLen - 0.08, 0.35, along ? segLen - 0.08 : 0.38, lx, plinth + wh - 0.15, lz, SOOT, { collide: false });
       }
     }
     for (let k = 0; k < 7; k++) {

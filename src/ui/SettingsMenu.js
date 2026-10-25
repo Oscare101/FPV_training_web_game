@@ -4,6 +4,11 @@ import { CATEGORIES, QUALITY_PRESETS, KEYS } from './settingsSchema.js';
 import { CalibrationScreen } from './CalibrationScreen.js';
 import { Osd } from './Osd.js';
 import { computeSun } from '../world/sun.js';
+import { ZONES, BLAST, GUIDE, GUIDE_RULES } from '../world/damage.js';
+import { renderVehiclePortraits } from '../render/portraits.js';
+
+const EFFECT_COLOR = { destroyed: '#e2553c', immobilized: '#e6a33a', damaged: '#a9a57a' }; // = portraits.js ZONE_COLORS
+const EFFECT_WORD = { destroyed: 'destroyed', immobilized: 'immobilized', damaged: 'damaged' };
 
 const RATE_AXES = ['roll', 'pitch', 'yaw'];
 const RATE_COLORS = { roll: '#9ccc4a', pitch: '#e0a040', yaw: '#6ab8ff' };
@@ -126,6 +131,10 @@ export class SettingsMenu {
     if (g.custom === 'quality') section.appendChild(this.buildQuality());
     if (g.custom === 'keys') section.appendChild(this.buildKeys());
     if (g.custom === 'osdPreview') section.appendChild(this.buildOsdPreview());
+    if (g.custom === 'guide') {
+      section.className = 'group-plain';
+      section.appendChild(this.buildGuide());
+    }
     if (g.custom === 'controller') {
       section.className = 'group-plain';
       const mount = h('div');
@@ -302,6 +311,49 @@ export class SettingsMenu {
       b.dataset.quality = k;
       wrap.appendChild(b);
       this.qualityButtons[k] = b;
+    }
+    return wrap;
+  }
+
+  // Target guide: per vehicle, direct-hit zone maps (top and side, drawn from the real zone rules),
+  // near-miss chances by distance, and tips; general rules first
+  buildGuide() {
+    this.guideImages = {};
+    const wrap = h('div', 'guide');
+    wrap.appendChild(h('div', 'guide-rules', GUIDE_RULES.map(([t, d]) => `<div><b>${t}</b><span>${d}</span></div>`).join('')));
+    wrap.appendChild(h('div', 'guide-legend', Object.entries(EFFECT_COLOR).map(([e, c]) => `<span><i style="background:${c}"></i>${EFFECT_WORD[e]}</span>`).join('') + '<span class="guide-front">◀ front</span>'));
+    for (const [type, info] of Object.entries(GUIDE)) {
+      const card = h('div', 'guide-card');
+      card.dataset.search = `${info.label} ${info.armor} target guide weak spots`.toLowerCase();
+      // zones this vehicle has (sampled over its hull box from all sides)
+      const zoneList = new Map();
+      for (let a = -1; a <= 1; a += 0.1) {
+        for (let b = -1; b <= 1; b += 0.1) {
+          for (const [u, v, w] of [[a, 0.95, b], [0.97, a, b], [a, b, -0.97], [a, b, 0.97]]) {
+            const [zone, effect] = ZONES[type](u, v, w);
+            if (!zoneList.has(zone)) zoneList.set(zone, effect);
+          }
+        }
+      }
+      const nearRows = BLAST[type].map(([d, outs]) => `<tr><td>≤ ${d} m</td><td>${outs.map(([e, p]) => `<span style="color:${EFFECT_COLOR[e]}">${EFFECT_WORD[e]} ${Math.round(p * 100)}%</span>`).join(' · ')}</td></tr>`).join('');
+      card.innerHTML = `
+        <div class="guide-head"><h4>${info.label}</h4><span>${info.armor}</span></div>
+        <p class="guide-summary">${info.summary}</p>
+        <div class="guide-body">
+          <div class="guide-maps">
+            <img class="guide-photo" alt="${info.label}">
+            <div class="guide-zone-shots"><img alt="weak spots, front"><img alt="weak spots, rear"></div>
+            <small>weak spots · front · rear</small>
+          </div>
+          <div class="guide-text">
+            <div class="guide-zones">${[...zoneList].map(([z, e]) => `<span><i style="background:${EFFECT_COLOR[e]}"></i>${z}: ${EFFECT_WORD[e]}</span>`).join('')}</div>
+            <table class="guide-near"><thead><tr><th>Near miss</th><th></th></tr></thead><tbody>${nearRows}<tr><td>further</td><td>no effect</td></tr></tbody></table>
+            <p class="guide-tips">${info.tips}</p>
+          </div>
+        </div>`;
+      const imgs = card.querySelectorAll('.guide-maps img');
+      this.guideImages[type] = { photo: imgs[0], front: imgs[1], rear: imgs[2] };
+      wrap.appendChild(card);
     }
     return wrap;
   }
@@ -491,6 +543,17 @@ export class SettingsMenu {
     }
     this.content.scrollTop = 0;
     if (id === 'hud') this.refreshOsdBackdrop();
+    if (id === 'guide' && !this.portraitsDone) {
+      // render the vehicle pictures the first time the guide opens
+      this.portraitsDone = true;
+      setTimeout(() => {
+        const pics = renderVehiclePortraits();
+        for (const [type, el] of Object.entries(this.guideImages)) {
+          if (!pics[type]) continue;
+          for (const k of ['photo', 'front', 'rear']) el[k].src = pics[type][k];
+        }
+      }, 30);
+    }
     this.updateLayout();
   }
 

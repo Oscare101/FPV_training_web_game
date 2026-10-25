@@ -41,6 +41,7 @@ export function defaultSettings() {
     game: { mode: 'free' },
     free: { enemies: true, reaction: true, alertness: 1, liveCharge: true, battery: false },
     strike: { difficulty: 'easy', conditions: 'random' },
+    hide: { difficulty: 'normal', shelter: 'random' },
     hunt: { variant: 'sweep', duration: 300, seed: 1 + Math.floor(Math.random() * 99999), season: 'summer', timeOfDay: 'day', weather: 'partly' },
     // seed 0 = random
     // renderScale: pixel ratio cap; detailDistance: radius of full-detail terrain/vegetation

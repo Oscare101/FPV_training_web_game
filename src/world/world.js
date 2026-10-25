@@ -189,7 +189,7 @@ export function createWorld(container) {
   const fx = createCameraFx(renderer);
 
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(90, 1, 0.05, 2500);
+  const camera = new THREE.PerspectiveCamera(90, 1, 0.08, 2500); // near plane: depth precision for distant walls vs close-up clipping
   const sky = createSky(scene);
 
   // Shared materials survive map rebuilds
@@ -217,6 +217,7 @@ export function createWorld(container) {
   let menuView = false;
   const menuPose = { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() };
   const menuBase = { layout: null, size: 0, a: 0 }; // clear camera angle for this map
+  let menuSide = 1;
   const menuRight = new THREE.Vector3();
 
   // Camera + settings state
@@ -351,6 +352,11 @@ export function createWorld(container) {
       return colliders.hits(p, r) || (vehiclesOn ? vehicles.hits(p, r) : null);
     },
 
+    // First static collider touching the sphere that passes filter(c) (e.g. walls for blast cover)
+    colliderAt(p, r, filter) {
+      return colliders.hits(p, r, filter);
+    },
+
     // Free Flight without enemies: vehicles hidden, not hittable, not driving
     setVehiclesEnabled(on) {
       vehiclesOn = on;
@@ -390,7 +396,10 @@ export function createWorld(container) {
       // grass: 'off' | 'flat' (painted on the ground) | '3d' (blades + painted ground under them)
       terrainMaterial.userData.uniforms.grassFlat.value = g.grass === 'off' ? 0 : 1;
       if (grass) grass.configure({ enabled: g.grass === '3d', radius: g.grassRadius, density: g.grassDensity, height: g.grassHeight });
-      if (vehicles) vehicles.setDust(g.dust);
+      if (vehicles) {
+        vehicles.setDust(g.dust);
+        vehicles.setCanopyShade(sky.shadowsOn); // real shadows do most of the darkening
+      }
     },
 
     // Per-frame flight context for grass: wind (m/s) and prop wash under the drone
@@ -446,7 +455,8 @@ export function createWorld(container) {
 
     // Main menu: the drone hovers over the launch pad, the camera circles it close up with the drone
     // left of centre (the menu panel is on the right). Returns the drone pose to draw.
-    updateMenuCamera(t, size) {
+    // side: 1 = drone left of centre (menu panel on the right), -1 = right of centre (settings panel on the left)
+    updateMenuCamera(t, size, side = 1) {
       const k = size / 5;
       if (!menuView || !observing) {
         menuView = true;
@@ -482,7 +492,8 @@ export function createWorld(container) {
       menuPose.quaternion.setFromEuler(new THREE.Euler(Math.sin(t * 0.9) * 0.03, menuBase.a + Math.PI - 0.65 + Math.sin(t * 0.25) * 0.15, Math.sin(t * 0.7) * 0.04, 'YXZ'));
       camera.position.set(l.x + Math.sin(a) * MENU.distance * k, menuPose.position.y + MENU.height * k, l.z + Math.cos(a) * MENU.distance * k);
       menuRight.set(Math.cos(a), 0, -Math.sin(a)); // camera's right
-      camera.lookAt(observerOffset.copy(menuPose.position).addScaledVector(menuRight, MENU.shift * k));
+      menuSide += (side - menuSide) * 0.08; // glide across when a panel opens
+      camera.lookAt(observerOffset.copy(menuPose.position).addScaledVector(menuRight, MENU.shift * 1.4 * menuSide * k));
       return menuPose;
     },
 

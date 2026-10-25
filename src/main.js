@@ -75,6 +75,7 @@ const mainMenu = new MainMenu(settings, document.body, {
   onPlay: (mode) => game.start(mode),
   onSettings: () => settingsMenu.open('drone', { allowed: GLOBAL_PAGES, title: 'Settings' }),
   onController: () => settingsMenu.open('controller', { allowed: GLOBAL_PAGES, title: 'Settings' }),
+  onGuide: () => settingsMenu.open('guide', { allowed: GLOBAL_PAGES, title: 'Settings' }),
   onFreeSetup: () => {
     game.setMode('free');
     settingsMenu.open('free', { allowed: FREE_SETUP_PAGES, title: 'Free Flight' });
@@ -135,7 +136,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyX') game.requestDetonate();
-  if (e.code === 'Enter' && !hud.el.result.hidden) game.action(game.mode === 'hunt' ? 'again' : 'retry');
+  if (e.code === 'Enter' && !hud.el.result.hidden) game.action(game.mode === 'hunt' ? 'again' : game.mode === 'hide' ? 'next' : 'retry');
   if (game.mode === 'free') {
     if (e.code === 'KeyN') {
       const t = settings.data.env.timeOfDay;
@@ -202,7 +203,7 @@ function frame(now) {
     world.updatePreviewCamera(preview, flight.renderPose, now / 1000);
     world.setDrone(flight.renderPose, size, flight.status === 'armed' ? 1 : 0, payload);
   } else if (inMenu) {
-    world.setDrone(world.updateMenuCamera(now / 1000, size), size, 1, payload); // the drone showcase
+    world.setDrone(world.updateMenuCamera(now / 1000, size, settingsMenu.visible ? -1 : 1), size, 1, payload); // the drone showcase
   } else {
     if (game.active.observing) world.updateObserverCamera(game.active.observeCenter, game.active.approach, game.active.timer);
     else world.updateCamera(flight.renderPose);

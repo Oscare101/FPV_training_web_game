@@ -1,5 +1,6 @@
 import { DRONE_PRESETS } from '../flight/presets.js';
 import { bestScore } from '../game/Hunt.js';
+import { hideBest } from '../game/HideSeek.js';
 
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
@@ -21,7 +22,7 @@ const seg = (name, options, value, disabled = false) =>
 // Main menu: the scene and the drone on the left (rendered by the world), title, mode cards with
 // their options and a big PLAY on the right; settings and controller buttons at the top.
 export class MainMenu {
-  // hooks: { onPlay(mode), onSettings(), onController(), onFreeSetup(), onSelect(mode), input }
+  // hooks: { onPlay(mode), onSettings(), onController(), onGuide(), onFreeSetup(), onSelect(mode), input }
   constructor(settings, parent, hooks) {
     this.settings = settings;
     this.hooks = hooks;
@@ -35,6 +36,7 @@ export class MainMenu {
         <div class="mm-logo"><span class="mm-logo-a">FPV</span><span class="mm-logo-b">FRONTLINE</span><small>drone flight trainer</small></div>
         <div class="mm-top-actions">
           <button data-action="controller" class="mm-chip"><span class="mm-dot"></span><span class="mm-pad">Controller</span></button>
+          <button data-action="guide" class="mm-chip">◈ Target guide</button>
           <button data-action="settings" class="mm-chip">⚙ Settings</button>
         </div>
       </header>
@@ -77,6 +79,7 @@ export class MainMenu {
     if (act === 'play') this.hooks.onPlay(this.selected);
     else if (act === 'settings') this.hooks.onSettings();
     else if (act === 'controller') this.hooks.onController();
+    else if (act === 'guide') this.hooks.onGuide();
     else if (act === 'free-setup') this.hooks.onFreeSetup();
     else if (act === 'new-field') s.set('hunt.seed', 1 + Math.floor(Math.random() * 99999));
     else if (card && card.dataset.card !== this.selected && !e.target.closest('select')) this.select(card.dataset.card);
@@ -126,16 +129,24 @@ export class MainMenu {
       <div class="mm-row"><label>Time of day</label>${seg('hunt.timeOfDay', [['morning', 'Morning'], ['day', 'Day'], ['evening', 'Evening'], ['night', 'Night']], h.timeOfDay)}</div>
       <div class="mm-row"><label>Weather</label>${seg('hunt.weather', [['clear', 'Clear'], ['partly', 'Cloudy'], ['overcast', 'Overcast'], ['rain', 'Rain'], ['snow', 'Snow'], ['fog', 'Fog']], h.weather)}</div>
       <div class="mm-row mm-cond"><span>Battlefield <b>#${h.seed}</b> · ${bestText}</span><button data-action="new-field">New battlefield</button></div>`;
+    const hd = d.hide;
+    const hb = hideBest(hd.difficulty);
+    const hideBody = `
+      <div class="mm-row"><label>Difficulty</label>${seg('hide.difficulty', [['easy', 'Easy'], ['normal', 'Normal'], ['hard', 'Hard']], hd.difficulty)}</div>
+      <p class="mm-note">${{ easy: 'Big openings, a close hint.', normal: 'Tighter gaps, a rougher hint.', hard: 'Slits and double nets; the hint is only roughly where it is.' }[hd.difficulty]}</p>
+      <div class="mm-row"><label>Hideout</label>${seg('hide.shelter', [['random', 'Random'], ['nets', 'Net tunnel'], ['barn', 'Barn'], ['dugout', 'Dugout']], hd.shelter)}</div>
+      <div class="mm-row mm-cond"><span>${hb ? `Best on ${hd.difficulty}: <b>${hb.drones}</b> drones · ${fmt(hb.time)}` : `No kill on ${hd.difficulty} yet`}</span></div>`;
     this.cards.innerHTML = [
       this.cardHtml('free', 'FREE FLIGHT', 'Fly anywhere, no goal, no battery limit', freeBody),
       this.cardHtml('strike', 'STRIKE MISSIONS', 'One drone, one target, new mission every time', strikeBody),
       this.cardHtml('hunt', 'HUNT', 'Clear the battlefield, unlimited drones', huntBody),
+      this.cardHtml('hide', 'HIDE & SEEK', 'One target in a hideout, close by. Find the way in', hideBody),
     ].join('');
     const preset = DRONE_PRESETS[d.drone.preset];
     this.droneEl.innerHTML = `<small>DRONE</small><b>${preset ? preset.label : `Custom ${d.drone.size}"`}</b>
       <span>${d.drone.size}" · ${d.drone.thrustToWeight.toFixed(1)}:1${payload ? ` · payload ${d.drone.payload.toFixed(1)} kg` : ''}</span>
       <button data-action="settings">Change</button>`;
-    this.playSub.textContent = { free: 'Free Flight', strike: `Strike · ${cap(st.difficulty)}`, hunt: `Hunt · ${cap(h.variant)}` }[this.selected];
+    this.playSub.textContent = { free: 'Free Flight', strike: `Strike · ${cap(st.difficulty)}`, hunt: `Hunt · ${cap(h.variant)}`, hide: `Hide & Seek · ${cap(hd.difficulty)}` }[this.selected];
   }
 
   // per frame while visible: controller status
@@ -148,7 +159,7 @@ export class MainMenu {
   }
 
   key(e) {
-    const order = ['free', 'strike', 'hunt'];
+    const order = ['free', 'strike', 'hunt', 'hide'];
     if (e.code === 'Enter') this.hooks.onPlay(this.selected);
     if (e.code === 'ArrowDown' || e.code === 'ArrowUp') {
       const i = order.indexOf(this.selected) + (e.code === 'ArrowDown' ? 1 : -1);
