@@ -148,8 +148,9 @@ export class GameHud {
     this.feedItems = [];
   }
 
-  // Direction arrow to a point (medium strike); near: show "ENEMY NEAR" instead
-  hint(from, toX, toZ, near) {
+  // Direction arrow to a point (medium strike, Hide & Seek); near: show "ENEMY NEAR" instead;
+  // round: distance shown to this many metres (0 = no distance)
+  hint(from, toX, toZ, near, round = 50) {
     this.used.add('hint');
     const el = this.el;
     el.hint.classList.toggle('near', near);
@@ -159,11 +160,23 @@ export class GameHud {
       return;
     }
     el.hintArrow.hidden = false;
-    _f.set(0, 0, -1).applyQuaternion(this.world.camera.quaternion);
-    const heading = Math.atan2(_f.x, -_f.z);
+    // Heading on the ground from the camera's right vector: it stays level when diving or looking
+    // straight down (the forward vector is then nearly vertical and its heading is noise). On its
+    // side (right vector vertical) fall back to the forward vector.
+    const q = this.world.camera.quaternion;
+    _f.set(1, 0, 0).applyQuaternion(q);
+    let fx = _f.z;
+    let fz = -_f.x;
+    if (Math.hypot(fx, fz) < 0.35) {
+      _f.set(0, 0, -1).applyQuaternion(q);
+      fx = _f.x;
+      fz = _f.z;
+    }
+    const heading = Math.atan2(fx, -fz);
     const to = Math.atan2(toX - from.x, -(toZ - from.z));
     el.hintArrow.style.transform = `rotate(${to - heading}rad)`;
-    setText(el.hintText, `~${Math.round(Math.hypot(toX - from.x, toZ - from.z) / 50) * 50} m`);
+    const d = Math.hypot(toX - from.x, toZ - from.z);
+    setText(el.hintText, round ? `~${Math.max(round, Math.round(d / round) * round)} m` : 'AREA');
   }
 
   // Marker on a vehicle (top of its hull), through the FPV lens distortion; clamped to the edge
@@ -201,7 +214,7 @@ export class GameHud {
     return dist;
   }
 
-  // result: { key, title, cls, lines: [html], actions: [[action, label, primary?]] }
+  // result: { key, title, cls, lines: [html], actions: [[action, label, primary?, locked: reason?]] }
   result(r) {
     this.used.add('result');
     if (this.resultKey === r.key) return;
@@ -209,6 +222,9 @@ export class GameHud {
     this.el.resultTitle.textContent = r.title;
     this.el.resultTitle.className = r.cls;
     this.el.resultLines.innerHTML = r.lines.map((l) => `<div>${l}</div>`).join('');
-    this.el.resultActions.innerHTML = r.actions.map(([a, l, primary]) => `<button data-action="${a}" class="${primary ? 'primary' : 'secondary'}">${l}</button>`).join('');
+    this.el.resultActions.innerHTML = r.actions
+      .map(([a, l, primary, locked]) => `<button data-action="${a}" class="${primary ? 'primary' : ''}"${locked ? ` disabled title="${locked}"` : ''}>${l}</button>`)
+      .join('');
+    this.primaryAction = r.actions.find(([, , primary]) => primary)?.[0] ?? null;
   }
 }

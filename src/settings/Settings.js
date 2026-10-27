@@ -4,7 +4,7 @@ import { MAP_DEFAULTS } from '../world/gen/layout.js';
 import { LOOK_PRESETS } from '../render/CameraFx.js';
 
 const STORAGE_KEY = 'fpv-trainer.settings.v1';
-const VERSION = 3; // bump with a migration below when defaults change meaning
+const VERSION = 4; // bump with a migration below when defaults change meaning
 
 // Weather presets: one choice sets clouds, rain, snow and fog
 export const WEATHER_PRESETS = {
@@ -36,12 +36,12 @@ export function defaultSettings() {
     audio: { volume: 0.6, muted: false },
     // Game modes. free: Free Flight sandbox (its map/weather are env + map below). strike: difficulty
     // 'easy' exact marker | 'medium' rough direction | 'hard' nothing; conditions 'random' (rolled per
-    // mission) | 'free' (the Free Flight weather). hunt: variant 'sweep' (clear all) | 'endless'
+    // mission) | 'custom' (the Custom conditions: weather + map pages). hunt: variant 'sweep' (clear all) | 'endless'
     // (vehicles respawn, duration s, 0 = no limit); a fixed battlefield: seed + conditions.
     game: { mode: 'free' },
     free: { enemies: true, reaction: true, alertness: 1, liveCharge: true, battery: false },
     strike: { difficulty: 'easy', conditions: 'random' },
-    hide: { difficulty: 'normal', shelter: 'random' },
+    hide: { difficulty: 'normal', shelter: 'random', conditions: 'random' },
     hunt: { variant: 'sweep', duration: 300, seed: 1 + Math.floor(Math.random() * 99999), season: 'summer', timeOfDay: 'day', weather: 'partly' },
     // seed 0 = random
     // renderScale: pixel ratio cap; detailDistance: radius of full-detail terrain/vegetation
@@ -88,6 +88,8 @@ export class Settings {
         if (typeof saved.mission.enemyReaction === 'boolean') this.data.free.reaction = saved.mission.enemyReaction;
         if (typeof saved.mission.alertness === 'number') this.data.free.alertness = saved.mission.alertness;
       }
+      if (this.data.strike.conditions === 'free') this.data.strike.conditions = 'custom'; // renamed in v4
+      if (!['random', 'net', 'dugout', 'building'].includes(this.data.hide.shelter)) this.data.hide.shelter = { nets: 'net', barn: 'building' }[this.data.hide.shelter] ?? 'random';
       this.data.version = VERSION;
     } catch {
       // corrupted or unavailable storage: defaults

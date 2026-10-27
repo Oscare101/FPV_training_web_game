@@ -131,7 +131,7 @@ export const CATEGORIES = [
   },
   {
     id: 'free', label: 'Free Flight', icon: '◎', preview: 'scene',
-    note: 'Free Flight only. Strike Missions and Hunt use their own rules.',
+    note: 'Free Flight only: enemies and rules. The other modes bring their own enemies.',
     groups: [
       {
         title: 'Enemies',
@@ -143,6 +143,29 @@ export const CATEGORIES = [
         ],
       },
       {
+        title: 'Enemy positions',
+        note: 'Applied right away on the same map.',
+        fields: [
+          { path: 'map.enemySites', label: 'Enemy sites', type: 'range', min: 1, max: 6, step: 1, fmt: (v) => `${v}`, tip: 'Groups of parked vehicles and ammo.' },
+          { path: 'map.vehiclesPerSite', label: 'Vehicles per site', type: 'range', min: 1, max: 6, step: 1, fmt: (v) => `~${v}`, tip: 'Average number of vehicles at each position.' },
+          { path: 'map.movingVehicles', label: 'Moving vehicles', type: 'range', min: 0, max: 8, step: 1, fmt: (v) => `${v}`, tip: 'Vehicles driving along roads and tracks.' },
+          { path: 'map.camoNets', label: 'Camo nets', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of parked vehicles under a camouflage net.' },
+          { path: 'map.branchCamo', label: 'Branch piles', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of the remaining vehicles covered with cut branches.' },
+          { path: 'map.hideouts', label: 'Hideouts', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of parked vehicles in a real hideout: a camouflage net draped over poles and pegged down (get in under a loose end or through a tear), or a dugout under logs and earth (only through the ramp at the back). Only where there is room for one.' },
+          { path: 'map.revetments', label: 'Dug-in vehicles', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of parked vehicles in a dug pit behind an earth berm.' },
+          { path: 'map.whitewash', label: 'Winter whitewash', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Winter only: share of vehicles with improvised white paint. In this war most vehicles stay green in winter; whitewash is occasional. Nets turn white regardless.' },
+          { path: 'map.wrecks', label: 'Wrecks (decoys)', type: 'range', min: 0, max: 15, step: 1, fmt: (v) => `${v}`, tip: 'Already destroyed vehicles (decoys: hitting one is a miss).' },
+        ],
+      },
+      {
+        title: 'Front line',
+        note: 'Moves the front line, so the map is rebuilt (same seed) when you let go of the slider.',
+        fields: [
+          { path: 'map.launchMin', label: 'Enemy distance min', type: 'range', min: 200, max: 1500, step: 50, fmt: meters, tip: 'Shortest distance from launch to the enemy area. The grey zone with its craters and ruins lies between.' },
+          { path: 'map.launchMax', label: 'Enemy distance max', type: 'range', min: 300, max: 1800, step: 50, fmt: meters, tip: 'Longest distance from launch to the enemy area.' },
+        ],
+      },
+      {
         title: 'Drone',
         fields: [
           { path: 'free.battery', label: 'Battery limit', type: 'checkbox', tip: 'Off = endless battery in Free Flight (Battery sag in Drone still applies in missions).' },
@@ -151,8 +174,8 @@ export const CATEGORIES = [
     ],
   },
   {
-    id: 'weather', label: 'Weather', icon: '☁', preview: 'scene',
-    note: 'Free Flight conditions. Strike Missions roll their own, Hunt has its battlefield.',
+    id: 'weather', label: 'Weather', icon: '☁', preview: 'scene', section: 'Custom conditions',
+    note: 'Custom conditions: Free Flight always uses them; Strike Missions and Hide & Seek when Conditions is set to Custom. Hunt has its own battlefield.',
     groups: [
       {
         title: 'Time & season',
@@ -206,8 +229,8 @@ export const CATEGORIES = [
     ],
   },
   {
-    id: 'map', label: 'Map', icon: '▦', preview: 'scene',
-    note: 'Free Flight map. Changes rebuild it automatically (same seed).',
+    id: 'map', label: 'Map', icon: '▦', preview: 'scene', section: 'Custom conditions',
+    note: 'Custom conditions: terrain, water and vegetation. In Free Flight the map is rebuilt when you let go of a slider (same seed). Strike Missions and Hide & Seek make a new map from these every round (the seed is ignored, Hide & Seek keeps its small map).',
     groups: [
       {
         title: 'Map',
@@ -218,24 +241,9 @@ export const CATEGORIES = [
             options: [['random', 'Random'], ...LAUNCH_SPOTS.map((k) => [k, k[0].toUpperCase() + k.slice(1)])],
             tip: 'Where you take off: field, tree line, ruins, trench… Random picks a different one every map.',
           },
-          { path: 'map.launchMin', label: 'Enemy distance min', type: 'range', min: 200, max: 1500, step: 50, fmt: meters, tip: 'Shortest distance from launch to the enemy area.' },
-          { path: 'map.launchMax', label: 'Enemy distance max', type: 'range', min: 300, max: 1800, step: 50, fmt: meters, tip: 'Longest distance from launch to the enemy area.' },
           { path: 'map.seed', label: 'Seed', type: 'number', tip: 'Same seed = same map. 0 = a random map every time.' },
         ],
         actions: [['new-map', 'New random map']],
-      },
-      {
-        title: 'Enemy',
-        fields: [
-          { path: 'map.enemySites', label: 'Enemy sites', type: 'range', min: 1, max: 6, step: 1, fmt: (v) => `${v}`, tip: 'Groups of parked vehicles and ammo.' },
-          { path: 'map.vehiclesPerSite', label: 'Vehicles per site', type: 'range', min: 1, max: 6, step: 1, fmt: (v) => `~${v}`, tip: 'Average number of vehicles at each position.' },
-          { path: 'map.movingVehicles', label: 'Moving vehicles', type: 'range', min: 0, max: 8, step: 1, fmt: (v) => `${v}`, tip: 'Vehicles driving along roads and tracks.' },
-          { path: 'map.camoNets', label: 'Camo nets', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of parked vehicles under a camouflage net.' },
-          { path: 'map.branchCamo', label: 'Branch piles', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of the remaining vehicles covered with cut branches.' },
-          { path: 'map.revetments', label: 'Dug-in vehicles', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of parked vehicles in a dug pit behind an earth berm.' },
-          { path: 'map.whitewash', label: 'Winter whitewash', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Winter only: share of vehicles with improvised white paint. In this war most vehicles stay green in winter; whitewash is occasional. Nets turn white regardless.' },
-          { path: 'map.wrecks', label: 'Wrecks (decoys)', type: 'range', min: 0, max: 15, step: 1, fmt: (v) => `${v}`, tip: 'Already destroyed vehicles (decoys: hitting one is a miss).' },
-        ],
       },
       {
         title: 'Terrain',
@@ -260,6 +268,7 @@ export const CATEGORIES = [
           { path: 'map.vegetation', label: 'Vegetation', type: 'range', min: 0.3, max: 2, step: 0.1, fmt: times, tip: 'Trees and bushes overall.' },
           { path: 'map.treeLines', label: 'Tree lines', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Windbreaks between fields, a typical hiding place for vehicles.' },
           { path: 'map.forest', label: 'Forest', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Amount of forest patches.' },
+          { path: 'map.farms', label: 'Farm yards', type: 'range', min: 0, max: 3, step: 1, fmt: (v) => `${v}`, tip: 'Collective-farm yards near the village: long sheds and garage blocks big enough to hide vehicles in, with gates, broken windows and shell holes in the roofs. Enemies sometimes park inside.' },
           { path: 'map.ruins', label: 'Ruined houses', type: 'range', min: 0, max: 1, step: 0.05, fmt: pct, tip: 'Share of village houses that are burnt shells or collapsed.' },
         ],
       },

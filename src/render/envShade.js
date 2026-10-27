@@ -142,6 +142,10 @@ export function installEnvShade() {
   if (installed) return;
   installed = true;
   const chunk = THREE.ShaderChunk;
+  // Radial fog (distance from the camera, not depth along the view axis): with the wide FPV lens,
+  // depth fog left things at the screen edges unfogged right up to where chunks are culled, so the
+  // empty ground beyond showed through
+  chunk.fog_vertex = chunk.fog_vertex.replace('vFogDepth = - mvPosition.z;', 'vFogDepth = length( mvPosition.xyz );');
   chunk.lights_pars_begin = `${chunk.lights_pars_begin}\n${PARS}`;
   const shadowCall = 'getShadow( directionalShadowMap[ i ], directionalLightShadow.shadowMapSize, directionalLightShadow.shadowIntensity, directionalLightShadow.shadowBias, directionalLightShadow.shadowRadius, vDirectionalShadowCoord[ i ] )';
   const info = 'getDirectionalLightInfo( directionalLight, directLight );';

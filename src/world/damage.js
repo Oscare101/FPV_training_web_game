@@ -107,5 +107,5 @@ export const GUIDE_RULES = [
   ['Cover', 'A wall, a wreck or an earth berm between the blast and a vehicle stops it. A fence lets about half through.'],
   ['Camo nets', 'Nets don\'t stop a blast, but they catch the drone: fast into a net sets off the fuse on the net (a near miss), slow tangles it and you crash. Look for an open edge to fly under.'],
   ['Wear', 'Damage adds up: hitting a damaged vehicle again immobilizes it, then destroys it.'],
-  ['Hideouts', 'Earth berms and log roofs stop a blast like walls. Tarp and net covers don\'t, but they catch the drone: get inside through the gap and hit the vehicle directly.'],
+  ['Hideouts', 'Earth over a dugout and the walls of a building stop a blast; a camouflage net doesn\'t, but it catches the drone. Get in where the crew left a way: a net end tied up or torn, a dugout\'s ramp, an open gate, a broken window, a shell hole in the roof. A net lying right on the armour gives no standoff: the charge goes off on the hull.'],
 ];

@@ -98,7 +98,12 @@ export class SettingsMenu {
     // Pages
     this.pages = {};
     this.navButtons = {};
+    this.navSections = {}; // section name -> header element (above its first category)
     for (const cat of CATEGORIES) {
+      if (cat.section && !this.navSections[cat.section]) {
+        this.navSections[cat.section] = h('div', 'nav-section', cat.section);
+        this.nav.appendChild(this.navSections[cat.section]);
+      }
       const btn = h('button', '', `<span class="nav-icon">${cat.icon}</span>${cat.label}`);
       btn.dataset.cat = cat.id;
       this.nav.appendChild(btn);
@@ -127,6 +132,7 @@ export class SettingsMenu {
   buildGroup(g, cat) {
     const section = h('section', 'group');
     if (g.title) section.appendChild(h('h3', '', g.title));
+    if (g.note) section.appendChild(h('p', 'group-note', g.note));
     if (g.custom === 'rates') section.appendChild(this.buildRates());
     if (g.custom === 'quality') section.appendChild(this.buildQuality());
     if (g.custom === 'keys') section.appendChild(this.buildKeys());
@@ -654,6 +660,7 @@ export class SettingsMenu {
       this.allowed = context.allowed ?? null;
       this.titleEl.textContent = context.title ?? 'Settings';
       for (const cat of CATEGORIES) this.navButtons[cat.id].hidden = !this.isAllowed(cat.id);
+      for (const [name, el] of Object.entries(this.navSections)) el.hidden = !CATEGORIES.some((c) => c.section === name && this.isAllowed(c.id));
       if (!category || !this.isAllowed(category)) category = this.isAllowed(this.category) ? this.category : this.allowed[0];
     }
     if (category) {

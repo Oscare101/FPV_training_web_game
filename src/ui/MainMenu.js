@@ -22,7 +22,7 @@ const seg = (name, options, value, disabled = false) =>
 // Main menu: the scene and the drone on the left (rendered by the world), title, mode cards with
 // their options and a big PLAY on the right; settings and controller buttons at the top.
 export class MainMenu {
-  // hooks: { onPlay(mode), onSettings(), onController(), onGuide(), onFreeSetup(), onSelect(mode), input }
+  // hooks: { onPlay(mode), onSettings(), onController(), onGuide(), onFreeSetup(), onConditions(), onSelect(mode), input }
   constructor(settings, parent, hooks) {
     this.settings = settings;
     this.hooks = hooks;
@@ -81,6 +81,7 @@ export class MainMenu {
     else if (act === 'controller') this.hooks.onController();
     else if (act === 'guide') this.hooks.onGuide();
     else if (act === 'free-setup') this.hooks.onFreeSetup();
+    else if (act === 'conditions') this.hooks.onConditions();
     else if (act === 'new-field') s.set('hunt.seed', 1 + Math.floor(Math.random() * 99999));
     else if (card && card.dataset.card !== this.selected && !e.target.closest('select')) this.select(card.dataset.card);
     e.target.closest('button')?.blur();
@@ -105,19 +106,24 @@ export class MainMenu {
     const d = this.settings.data;
     const f = d.free;
     const payload = d.drone.payload > 0;
+    const custom = `${cap(d.map.season)} · ${cap(d.env.timeOfDay)} · ${WEATHER[d.env.weather] ?? 'Custom'} · wind ${d.env.windSpeed} m/s`;
+    const conditionsRow = (path, value, randomNote) => `
+      <div class="mm-row"><label>Conditions</label>${seg(path, [['random', 'Random'], ['custom', 'Custom']], value)}</div>
+      ${value === 'custom'
+        ? `<div class="mm-row mm-cond"><span>${custom}</span><button data-action="conditions">Custom conditions…</button></div>`
+        : `<p class="mm-note">${randomNote}</p>`}`;
     const freeBody = `
       <div class="mm-row"><label>Enemies</label>${seg('free.enemies', [[true, 'On'], [false, 'Off']], f.enemies)}</div>
       <div class="mm-row"><label>Live charge</label>${seg('free.liveCharge', [[true, 'On'], [false, 'Off']], f.liveCharge, !f.enemies)}</div>
       ${f.enemies && f.liveCharge && !payload ? '<p class="mm-note">Live charge needs a drone with a payload (e.g. 7" strike, Settings → Drone).</p>' : ''}
       <div class="mm-row"><label>Battery limit</label>${seg('free.battery', [[false, 'Off'], [true, 'On']], f.battery)}</div>
-      <div class="mm-row mm-cond"><span>${cap(d.map.season)} · ${cap(d.env.timeOfDay)} · ${WEATHER[d.env.weather] ?? 'Custom'} · wind ${d.env.windSpeed} m/s</span>
-        <button data-action="free-setup">Map &amp; weather…</button></div>`;
+      <div class="mm-row mm-cond"><span>Enemy positions, reactions, front line</span><button data-action="free-setup">Enemies…</button></div>
+      <div class="mm-row mm-cond"><span>${custom}</span><button data-action="conditions">Custom conditions…</button></div>`;
     const st = d.strike;
     const strikeBody = `
       <div class="mm-row"><label>Difficulty</label>${seg('strike.difficulty', [['easy', 'Easy'], ['medium', 'Medium'], ['hard', 'Hard']], st.difficulty)}</div>
       <p class="mm-note">${DIFFICULTY[st.difficulty]}</p>
-      <div class="mm-row"><label>Conditions</label>${seg('strike.conditions', [['random', 'Random'], ['free', 'Free Flight\'s']], st.conditions)}</div>
-      <p class="mm-note">${st.conditions === 'random' ? 'Every mission a new map, season, time and weather.' : 'Every mission a new map, with the season and weather you set for Free Flight.'}</p>`;
+      ${conditionsRow('strike.conditions', st.conditions, 'Every mission a new map, season, time and weather.')}`;
     const h = d.hunt;
     const best = bestScore(h);
     const bestText = best ? (h.variant === 'sweep' ? `Best ${fmt(best.time)} · ${best.drones} drones` : `Best ${best.kills} destroyed`) : 'No record on this battlefield yet';
@@ -133,8 +139,9 @@ export class MainMenu {
     const hb = hideBest(hd.difficulty);
     const hideBody = `
       <div class="mm-row"><label>Difficulty</label>${seg('hide.difficulty', [['easy', 'Easy'], ['normal', 'Normal'], ['hard', 'Hard']], hd.difficulty)}</div>
-      <p class="mm-note">${{ easy: 'Big openings, a close hint.', normal: 'Tighter gaps, a rougher hint.', hard: 'Slits and double nets; the hint is only roughly where it is.' }[hd.difficulty]}</p>
-      <div class="mm-row"><label>Hideout</label>${seg('hide.shelter', [['random', 'Random'], ['nets', 'Net tunnel'], ['barn', 'Barn'], ['dugout', 'Dugout']], hd.shelter)}</div>
+      <p class="mm-note">${{ easy: 'One hideout, loose nets and big gaps, a close hint.', normal: 'Two hideouts, one occupied. Tighter gaps.', hard: 'Three hideouts, one occupied. Only small tears and low gaps; a rough hint.' }[hd.difficulty]}</p>
+      <div class="mm-row"><label>Hideout</label>${seg('hide.shelter', [['random', 'Random'], ['net', 'Camo net'], ['dugout', 'Dugout'], ['building', 'Building']], hd.shelter)}</div>
+      ${conditionsRow('hide.conditions', hd.conditions, 'Mild random weather every round.')}
       <div class="mm-row mm-cond"><span>${hb ? `Best on ${hd.difficulty}: <b>${hb.drones}</b> drones · ${fmt(hb.time)}` : `No kill on ${hd.difficulty} yet`}</span></div>`;
     this.cards.innerHTML = [
       this.cardHtml('free', 'FREE FLIGHT', 'Fly anywhere, no goal, no battery limit', freeBody),
@@ -152,10 +159,14 @@ export class MainMenu {
   // per frame while visible: controller status
   update() {
     if (!this.visible) return;
-    const gp = this.hooks.input.gamepad;
-    const text = gp ? gp.id.replace(/\(.*?\)/g, '').trim().slice(0, 28) || 'Controller' : 'No controller · keyboard';
+    const input = this.hooks.input;
+    const gp = input.gamepad;
+    const setup = gp && !input.config.calibrated;
+    const name = gp ? gp.id.replace(/\(.*?\)/g, '').trim().slice(0, 28) || 'Controller' : '';
+    const text = !gp ? 'No controller · keyboard' : setup ? `${name.slice(0, 18)} · set it up →` : name;
     if (this.padLabel.textContent !== text) this.padLabel.textContent = text;
-    this.dot.classList.toggle('on', !!gp);
+    this.dot.classList.toggle('on', !!gp && !setup);
+    this.dot.parentElement.classList.toggle('attention', !!setup);
   }
 
   key(e) {

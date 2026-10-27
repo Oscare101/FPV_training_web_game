@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { camoNetMaterial, NET_TILE as CAMO_TILE } from './camoNet.js';
 import { mergeParts } from './meshUtils.js';
 import { createDriver } from './vehicleAI.js';
 import { mulberry32 } from './random.js';
@@ -122,64 +123,11 @@ const WRECK_LOSS = {
 
 // Paint variants (multiplied with the vertex colours): olive, dark green, sand, grey, brown
 const CAMO_TINTS = [[1, 1, 1], [0.85, 0.92, 0.82], [1.12, 1.02, 0.82], [0.95, 0.96, 0.97], [1.05, 0.93, 0.8]];
-// Net garnish per season (winter nets are white/grey, autumn ochre/brown)
-const NET_COLORS = {
-  summer: [[74, 86, 46], [92, 98, 54], [104, 94, 62], [62, 72, 40], [118, 110, 72], [84, 70, 48]],
-  spring: [[70, 92, 44], [86, 104, 52], [60, 80, 38], [96, 110, 60], [78, 88, 48], [92, 96, 56]],
-  autumn: [[112, 92, 52], [128, 100, 56], [96, 78, 46], [84, 82, 46], [140, 112, 64], [104, 70, 40]],
-  winter: [[200, 204, 206], [176, 180, 182], [214, 216, 218], [150, 152, 150], [188, 190, 186], [120, 122, 116]],
-};
 // brightness of a vehicle under tree crowns / a net (stand-in for shadows; milder when real shadows are on)
 const CANOPY_SHADE = { shadows: 0.82, none: 0.55 };
 const NET_SHADE = { shadows: 0.88, none: 0.7 };
 let shadeMode = 'none';
 const NET_FLAT = 0.07; // vertical scale of a net lying on the ground
-const NET_TILE = 1.6; // m of net per texture repeat
-
-// Camo net texture: diagonal cord grid with leaf-shaped garnish; transparent between (alphaTest)
-export function createNetTexture(season) {
-  const palette = NET_COLORS[season] ?? NET_COLORS.summer;
-  const N = 256;
-  const rand = mulberry32(5);
-  const data = new Uint8Array(N * N * 4);
-  const set = (x, y, [r, g, b]) => {
-    const i = (((y + N) % N) * N + ((x + N) % N)) * 4;
-    data[i] = r;
-    data[i + 1] = g;
-    data[i + 2] = b;
-    data[i + 3] = 255;
-  };
-  for (let y = 0; y < N; y++) {
-    for (let x = 0; x < N; x++) {
-      if ((x + y) % 18 < 2 || (x - y + N * 4) % 18 < 2) set(x, y, season === 'winter' ? [120, 122, 118] : [40, 42, 30]); // cords
-    }
-  }
-  for (let k = 0; k < 1300; k++) {
-    const cx = rand() * N;
-    const cy = rand() * N;
-    const rx = 3 + rand() * 6;
-    const ry = 2 + rand() * 4;
-    const a = rand() * Math.PI;
-    const col = palette[Math.floor(rand() * palette.length)];
-    const shade = 0.8 + rand() * 0.35;
-    const c = [col[0] * shade, col[1] * shade, col[2] * shade];
-    for (let dy = -rx; dy <= rx; dy++) {
-      for (let dx = -rx; dx <= rx; dx++) {
-        const u = (dx * Math.cos(a) + dy * Math.sin(a)) / rx;
-        const v = (-dx * Math.sin(a) + dy * Math.cos(a)) / ry;
-        if (u * u + v * v <= 1) set(Math.floor(cx + dx), Math.floor(cy + dy), c);
-      }
-    }
-  }
-  const tex = new THREE.DataTexture(data, N, N, THREE.RGBAFormat);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.magFilter = THREE.LinearFilter;
-  tex.minFilter = THREE.LinearMipmapLinearFilter;
-  tex.generateMipmaps = true;
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.needsUpdate = true;
-  return tex;
-}
 
 // Highest visible part under a local point (from the model's part boxes), sloping off its edges
 function supportHeight(parts, lx, lz) {
@@ -218,7 +166,7 @@ function buildNet(half, parts, rand, openFront, openRear) {
       const y = open && i > 0 && i < N ? lift : edge ? -0.05 : awning;
       heights[j * (N + 1) + i] = y;
       positions.push(lx, y, lz);
-      uvs.push(lx / NET_TILE, lz / NET_TILE);
+      uvs.push(lx / CAMO_TILE, lz / CAMO_TILE);
     }
   }
   const idx = [];
@@ -302,7 +250,7 @@ export function createVehicles(group, layout, colliders, effects) {
   let dust = true;
   const season = layout.season ?? 'summer';
   const mud = SEASON_MUD[season] ?? 0.6;
-  const netMaterial = new THREE.MeshLambertMaterial({ map: createNetTexture(season), alphaTest: 0.5, side: THREE.DoubleSide });
+  const netMaterial = camoNetMaterial(season); // shared with the hideout nets
   const branchMaterial = new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true });
   const geometries = {};
   const vehicles = [];
@@ -337,6 +285,7 @@ export function createVehicles(group, layout, colliders, effects) {
     mesh.rotation.order = 'YXZ';
     group.add(mesh);
     const v = {
+      id: vehicles.length, // fixed order (who yields in a standoff)
       type,
       label: LABELS[type],
       armored: ARMORED[type],
@@ -378,7 +327,7 @@ export function createVehicles(group, layout, colliders, effects) {
       probe.y = base + dy;
       probe.z = v.z;
       const hit = colliders.hits(probe, 1.2);
-      if (hit && hit.kind === 'tree') return true;
+      if (hit && (hit.kind === 'tree' || hit.kind === 'building' || hit.kind === 'cover')) return true; // crowns, roofs, dugouts
     }
     return false;
   };
@@ -469,8 +418,9 @@ export function createVehicles(group, layout, colliders, effects) {
 
   // Drivability grid after all static colliders exist (wrecks included)
   const nav = createNavGrid(layout, colliders);
-  const driverCtx = { heightAt, colliders, sampleRoute, coverPoints: layout.coverPoints, half: layout.half, nav };
-  for (const v of vehicles) if (v.type !== 'ammo') v.driver = createDriver(v, driverCtx);
+  const driverCtx = { heightAt, colliders, sampleRoute, coverPoints: layout.coverPoints, half: layout.half, nav, vehicles };
+  // vehicles in a hideout (net, dugout) don't drive off: their crews rely on staying hidden
+  for (const v of vehicles) if (v.type !== 'ammo' && !v.home?.shelter) v.driver = createDriver(v, driverCtx);
 
   let shadeTimer = 0;
   // threat: the drone ({ position }) or null; reactions: enemy reaction enabled; alertness: detection multiplier
@@ -518,6 +468,10 @@ export function createVehicles(group, layout, colliders, effects) {
         v.yaw = v.home.yaw;
         v.speed = 0;
       }
+    }
+    // patrols starting on top of another vehicle move on along their route
+    for (const v of vehicles) v.driver?.unoverlap?.();
+    for (const v of vehicles) {
       place(v);
       v.shade = underCanopy(v) ? CANOPY_SHADE[shadeMode] : 1;
       applyColor(v);
@@ -576,9 +530,10 @@ export function createVehicles(group, layout, colliders, effects) {
   }
 
   // Returns { kind: 'vehicle', vehicle, zone, effect }, { kind: 'net', vehicle } or null
-  function hits(p, r) {
+  // hullOnly: ignore the nets (what the charge meets right behind a net)
+  function hits(p, r, hullOnly = false) {
     for (const v of vehicles) {
-      if (v.netMesh && netHit(v, p, r)) return { kind: 'net', vehicle: v };
+      if (!hullOnly && v.netMesh && netHit(v, p, r)) return { kind: 'net', vehicle: v };
       const c = v.mesh.position;
       const dx = p.x - c.x;
       const dz = p.z - c.z;
@@ -641,8 +596,6 @@ export function createVehicles(group, layout, colliders, effects) {
     }
     for (const g of Object.values(geometries)) for (const geo of [g.geo, g.hull, g.turret]) geo?.dispose();
     charred.dispose();
-    netMaterial.map.dispose();
-    netMaterial.dispose();
     branchMaterial.dispose();
     rusted.dispose();
     scorchMat.dispose();

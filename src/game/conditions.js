@@ -13,10 +13,12 @@ export const HUNT_MAP = {
   wrecks: 3, lakes: 0, rivers: 1, craters: 1.2, launchSpot: 'random',
 };
 export const HUNT_WIND = 2; // m/s, same every round so times compare
-// Hide & Seek: small map, one hidden target close to the launch point, nothing else to shoot
+// Hide & Seek: small map, one hidden target close to the launch point, nothing else to shoot.
+// Ground detail at least 2 m there, so a dugout's pit has sharp edges.
 export const HIDE_MAP = {
-  size: 1500, launchMin: 110, launchMax: 220, enemySites: 0, movingVehicles: 0, wrecks: 2, lakes: 0, rivers: 0, launchSpot: 'field',
+  size: 1500, launchMin: 110, launchMax: 220, enemySites: 0, movingVehicles: 0, wrecks: 2, launchSpot: 'field',
 };
+const HIDE_RANDOM_TERRAIN = { lakes: 0, rivers: 0 };
 
 const pick = (weights, rand = Math.random) => {
   let t = rand() * Object.values(weights).reduce((a, b) => a + b, 0);
@@ -49,6 +51,9 @@ function weatherOverrides(name) {
   return { env, graphics };
 }
 
+// Custom conditions map (Map page) without what the modes decide themselves: enemies, front line, seed
+const customMap = (map) => Object.fromEntries(Object.entries(map).filter(([k]) => !ENEMY_KEYS.includes(k) && !['launchMin', 'launchMax', 'seed'].includes(k)));
+
 // data: saved settings; ctx: { mode, conditions (strike roll) }
 export function effectiveSettings(data, { mode, conditions }) {
   const detail = Object.fromEntries(DETAIL_KEYS.map((k) => [k, data.map[k]]));
@@ -61,14 +66,17 @@ export function effectiveSettings(data, { mode, conditions }) {
       map: { ...MAP_DEFAULTS, ...detail, season: conditions.season },
     };
   }
-  if (mode === 'strike') return { ...data, map: { ...MAP_DEFAULTS, ...detail, season: data.map.season } };
+  if (mode === 'strike') return { ...data, map: { ...MAP_DEFAULTS, ...customMap(data.map), ...detail } };
+  if (mode === 'hide' && conditions && data.hide.conditions === 'custom') {
+    return { ...data, map: { ...MAP_DEFAULTS, ...customMap(data.map), ...HIDE_MAP, ...detail, terrainCell: Math.min(detail.terrainCell, 2), farmNearLaunch: conditions.shelter === 'building', hideSeek: { shelter: conditions.shelter, difficulty: data.hide.difficulty } } };
+  }
   if (mode === 'hide' && conditions) {
     const w = weatherOverrides(conditions.weather);
     return {
       ...data,
       env: { ...data.env, ...w.env, weather: conditions.weather, timeOfDay: conditions.timeOfDay, windSpeed: conditions.windSpeed, windDir: conditions.windDir },
       graphics: { ...data.graphics, ...w.graphics },
-      map: { ...MAP_DEFAULTS, ...HIDE_MAP, ...detail, season: conditions.season, hideSeek: { shelter: conditions.shelter, difficulty: data.hide.difficulty } },
+      map: { ...MAP_DEFAULTS, ...HIDE_MAP, ...HIDE_RANDOM_TERRAIN, ...detail, terrainCell: Math.min(detail.terrainCell, 2), season: conditions.season, farmNearLaunch: conditions.shelter === 'building', hideSeek: { shelter: conditions.shelter, difficulty: data.hide.difficulty } },
     };
   }
   if (mode === 'hunt') {
@@ -85,6 +93,10 @@ export function effectiveSettings(data, { mode, conditions }) {
   return { ...data, drone: { ...data.drone, batterySim: data.drone.batterySim && data.free.battery } };
 }
 
-// Map generation parameters only (what a rebuild depends on)
-export const MAP_GEN_KEYS = [...Object.keys(MAP_DEFAULTS), 'vegDetail'];
+// Enemy-layer settings: changing them swaps the enemies on the same map (no rebuild)
+export const ENEMY_KEYS = ['enemySites', 'vehiclesPerSite', 'movingVehicles', 'camoNets', 'branchCamo', 'revetments', 'hideouts', 'whitewash', 'wrecks'];
+// Map generation parameters only (what a full rebuild depends on)
+export const MAP_GEN_KEYS = [...Object.keys(MAP_DEFAULTS).filter((k) => !ENEMY_KEYS.includes(k)), 'vegDetail', 'seed'];
 export const mapKeyOf = (map) => MAP_GEN_KEYS.map((k) => map[k]).join('/');
+export const enemyKeyOf = (map) => ENEMY_KEYS.map((k) => map[k]).join('/');
+export const enemyOptionsOf = (map) => Object.fromEntries(ENEMY_KEYS.map((k) => [k, map[k]]));

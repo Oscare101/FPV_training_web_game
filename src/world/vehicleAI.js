@@ -42,6 +42,9 @@ const ARRIVE = 7; // m from the destination counts as arrived
 const FLEE = [220, 480]; // m, how far a fleeing vehicle goes in one leg
 const COVER = [60, 450]; // m, cover points considered
 const HIDE_RECOVER = [20, 40]; // s hidden before a patrolling vehicle goes back to its route
+// Traffic: keep right on routes (oncoming vehicles pass), keep a gap behind slower ones
+const LANE = { road: 1.8, track: 0.7 }; // m right of the route centre line (field tracks are narrow)
+const FOLLOW_GAP = 4; // m bumper to bumper, plus ~1.5 s of speed
 
 const wrap = (a) => Math.atan2(Math.sin(a), Math.cos(a));
 const clamp = (v, lo, hi) => (v < lo ? lo : v > hi ? hi : v);
@@ -82,7 +85,7 @@ function closestOnRoute(route, x, z, s0 = 0, s1 = route.total) {
 }
 
 // nav: drivability grid + planner (navGrid.js), shared by all vehicles
-export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints, half, nav }) {
+export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints, half, nav, vehicles = [] }) {
   const bound = half - 60;
   const drive = DRIVE[v.type];
   const vision = VISION[v.type];
@@ -116,12 +119,18 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     time: 0,
     desiredYaw: 0,
     targetSpeed: 0,
+    laneBias: 0, // extra metres to the right (after a head-on standoff, overtaking a stopped vehicle)
+    waitAhead: 0, // s stuck behind a stopped vehicle
+    escape: null, // { yaw, sign, timer }: way out of a jam
+    blockedBy: null, // vehicle in the way at the last move, and since when
+    blockedSince: 0,
+    jamSince: 0,
   };
 
   function reset(home) {
     Object.assign(d, {
       awareness: 0, aware: false, lastSeen: -Infinity, seeing: false, goal: null, path: null, jink: null,
-      reverse: 0, turnPhase: 0, planWait: 0, bumps: 0, boxedUntil: 0, planFails: 0, stuckTimer: 0, timer: 0,
+      reverse: 0, turnPhase: 0, escape: null, laneBias: 0, waitAhead: 0, planWait: 0, bumps: 0, boxedUntil: 0, planFails: 0, stuckTimer: 0, timer: 0,
     });
     v.speed = 0;
     v.yawRate = 0;
@@ -142,6 +151,18 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     }
     d.desiredYaw = v.yaw;
     d.targetSpeed = v.speed;
+  }
+
+  // A patrol spawned overlapping another vehicle: slide it along its route until clear
+  function unoverlap() {
+    if (!v.moving) return;
+    for (let k = 0; k < 30 && vehicleAt(v.x, v.z, v.yaw); k++) {
+      v.s = (v.s + 9 * v.dir + v.route.total) % v.route.total;
+      sampleRoute(v.route, v.s, sample);
+      v.x = sample.x;
+      v.z = sample.z;
+      v.yaw = sample.yaw + (v.dir < 0 ? Math.PI : 0);
+    }
   }
   // ---------- perception ----------
 
@@ -393,6 +414,7 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
       case 'patrol':
         d.desiredYaw = patrolTarget();
         d.targetSpeed = v.patrolSpeed;
+        traffic();
         threePointTurn(dt); // end of the road
         if (d.aware) { d.mode = 'react'; d.timer = behavior.reaction; }
         else if (d.blockedOnRoute && nav.budget > 0) {
@@ -460,6 +482,15 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
         break;
       }
     }
+    if (d.escape) {
+      // getting out of a jam with another vehicle (see findEscape)
+      d.escape.timer -= dt;
+      d.desiredYaw = d.escape.yaw;
+      d.targetSpeed = d.escape.sign * 3;
+      d.turnPhase = 0;
+      if (d.escape.timer <= 0) d.escape = null;
+      return;
+    }
     if (d.reverse > 0) {
       d.reverse -= dt;
       d.turnPhase = 0;
@@ -476,7 +507,53 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     if (v.dir > 0 && v.s > v.route.total - 6) v.dir = -1;
     if (v.dir < 0 && v.s < 6) v.dir = 1;
     sampleRoute(v.route, clamp(v.s + v.dir * lookahead, 0, v.route.total), sample);
-    return yawTo(sample.x - v.x, sample.z - v.z);
+    // aim right of the centre line (right of the direction we travel along the route)
+    const ry = sample.yaw + (v.dir < 0 ? Math.PI : 0);
+    const lane = (v.home.route === 'main' || v.home.route === 'cross' ? LANE.road : LANE.track) + d.laneBias;
+    return yawTo(sample.x + Math.cos(ry) * lane - v.x, sample.z - Math.sin(ry) * lane - v.z);
+  }
+
+  // Slow down behind a slower vehicle ahead in the lane, and when passing oncoming traffic
+  function traffic() {
+    let blocked = false;
+    const fx = -Math.sin(v.yaw);
+    const fz = -Math.cos(v.yaw);
+    for (const w of vehicles) {
+      if (w === v) continue;
+      const dx = w.x - v.x;
+      const dz = w.z - v.z;
+      const along = dx * fx + dz * fz;
+      if (along <= 0 || along > 40) continue;
+      const lateral = Math.abs(dx * fz - dz * fx);
+      const width = v.half.x + w.half.x + 0.8;
+      if (lateral > width + 1) continue;
+      const gap = along - v.half.z - w.half.z;
+      const wfx = -Math.sin(w.yaw);
+      const wfz = -Math.cos(w.yaw);
+      const oncoming = wfx * fx + wfz * fz < -0.5 && Math.abs(w.speed) > 0.5;
+      if (oncoming) {
+        d.targetSpeed = Math.min(d.targetSpeed, Math.max(2.5, v.patrolSpeed * 0.5)); // pass carefully
+      } else if (lateral < width) {
+        const ahead = Math.max(0, w.speed * (wfx * fx + wfz * fz)); // its speed along our way
+        const safe = FOLLOW_GAP + Math.abs(v.speed) * 1.5;
+        if (gap < safe) {
+          d.targetSpeed = Math.min(d.targetSpeed, gap < FOLLOW_GAP ? 0 : ahead * 0.9);
+          // stopped there (parked, broken down, burnt out): after a moment swing out and overtake
+          if (ahead < 1) {
+            d.waitAhead += AI_TICK;
+            if (d.waitAhead > 2) {
+              d.laneBias = Math.min(width + 0.4, d.laneBias + 0.4);
+              d.targetSpeed = Math.max(d.targetSpeed, 3);
+            }
+            blocked = true;
+          }
+        }
+      }
+    }
+    if (!blocked) {
+      d.waitAhead = Math.max(0, d.waitAhead - AI_TICK * 0.5); // decays: a leader that creeps on and off still gets passed
+      d.laneBias = Math.max(0, d.laneBias - AI_TICK * 0.15);
+    }
   }
 
   // Hull footprint at a pose overlaps something solid (trunk, wall, log, wreck)? Three spheres
@@ -493,6 +570,49 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
       if (colliders.hits(probe, r, isSolidForVehicles)) return true;
     }
     return false;
+  }
+
+  // Another vehicle whose hull (three circles along the body) the hull at this pose touches
+  function vehicleAt(x, z, yaw) {
+    const r = v.half.x * 0.95;
+    const sx = -Math.sin(yaw);
+    const sz = -Math.cos(yaw);
+    for (const w of vehicles) {
+      if (w === v) continue;
+      const reach = v.half.z + w.half.z + r + w.half.x;
+      if (Math.abs(w.x - x) > reach || Math.abs(w.z - z) > reach) continue;
+      const wr = w.half.x * 0.95;
+      const wsx = -Math.sin(w.yaw);
+      const wsz = -Math.cos(w.yaw);
+      for (const f of [-0.6, 0, 0.6]) {
+        const ax = x + sx * v.half.z * f;
+        const az = z + sz * v.half.z * f;
+        for (const g of [-0.6, 0, 0.6]) {
+          const bx = w.x + wsx * w.half.z * g;
+          const bz = w.z + wsz * w.half.z * g;
+          if ((ax - bx) ** 2 + (az - bz) ** 2 < (r + wr) ** 2) return w;
+        }
+      }
+    }
+    return null;
+  }
+
+  // Jammed by another vehicle for a while: find a short move (back, back-left/right, forward-left/
+  // right) whose end pose touches neither vehicles nor obstacles, and drive it
+  function findEscape() {
+    for (const sign of [-1, 1]) {
+      for (const dy of [0, 0.5, -0.5, 1, -1]) {
+        if (sign > 0 && dy === 0) continue;
+        const yaw = wrap(v.yaw + dy);
+        const x = v.x - Math.sin(yaw) * 2.5 * sign;
+        const z = v.z - Math.cos(yaw) * 2.5 * sign;
+        if (!overlaps(x, z, yaw) && !vehicleAt(x, z, yaw)) {
+          d.escape = { yaw, sign, timer: 1.6 };
+          d.path = null;
+          return;
+        }
+      }
+    }
   }
 
   // ---------- driving ----------
@@ -518,6 +638,33 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     // the rear is what's blocked). Moves out of an existing overlap are allowed.
     const nx = v.x - Math.sin(newYaw) * v.speed * dt;
     const nz = v.z - Math.cos(newYaw) * v.speed * dt;
+    // another vehicle in the way: stop and wait; in a standoff one of them (the lower id waits) backs
+    // off and moves further right
+    const moved = nx !== v.x || nz !== v.z || newYaw !== oldYaw;
+    const other = moved ? vehicleAt(nx, nz, newYaw) : null;
+    if (other && !vehicleAt(v.x, v.z, oldYaw)) {
+      v.speed = 0;
+      v.yawRate = 0;
+      if (d.blockedBy !== other) {
+        if (!d.blockedBy) d.jamSince = d.time; // jammed by vehicles since (whichever)
+        d.blockedBy = other;
+        d.blockedSince = d.time;
+      }
+      // the higher id yields; if it can't back up (blocked behind), the other one does
+      const otherStuck = other.driver && other.driver.state.time - (other.driver.state.cantReverse ?? -1e9) < 3;
+      if (d.time - d.blockedSince > 1.5 && d.reverse <= 0 && (v.id > other.id || otherStuck || !other.driver)) {
+        d.reverse = rand(1, 1.6);
+        d.laneBias = Math.min(1.2, d.laneBias + 0.6);
+        d.blockedSince = d.time;
+      }
+      if (d.time - d.jamSince > 3 && !d.escape) {
+        findEscape();
+        d.jamSince = d.time;
+      }
+      d.stuckTimer = 0;
+      return;
+    }
+    d.blockedBy = null;
     if ((nx !== v.x || nz !== v.z || newYaw !== oldYaw) && overlaps(nx, nz, newYaw) && !overlaps(v.x, v.z, oldYaw)) {
       const sign = Math.sign(v.speed);
       v.speed = 0;
@@ -546,7 +693,10 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
           d.reverse = 0;
           d.bumps = 0;
         }
-      } else if (sign < 0) d.reverse = 0;
+      } else if (sign < 0) {
+        d.reverse = 0;
+        d.cantReverse = d.time; // something behind: in a standoff the other vehicle backs off
+      }
       return;
     }
     v.yaw = newYaw;
@@ -588,5 +738,5 @@ export function createDriver(v, { heightAt, colliders, sampleRoute, coverPoints,
     integrate(dt);
   }
 
-  return { state: d, reset, update };
+  return { state: d, reset, update, unoverlap };
 }

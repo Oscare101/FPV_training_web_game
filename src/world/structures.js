@@ -1,13 +1,23 @@
 import * as THREE from 'three';
 import { mulberry32 } from './random.js';
-import { mergeParts } from './meshUtils.js';
+import { mergeParts, mergeTextured } from './meshUtils.js';
+import { SURFACES, surfaceMaterial } from './textures.js';
 import { buildBuilding, buildFence } from './buildings.js';
-import { buildShelter } from './shelters.js';
-import { createNetTexture } from './vehicles.js';
+import { buildShelter, buildTrackGeometry } from './shelters.js';
+import { camoNetMaterial } from './camoNet.js';
 
 const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 const BARK = { pine: 0x7a5236, birch: 0xd2cfc4, oak: 0x4a4036, acacia: 0x3e3630, burnt: 0x1c1916 };
 const DRY_CROWN = { spring: 0x5e5032, summer: 0x5a5a32, autumn: 0x6a4a28 }; // wilted leaves on a fallen crown
+
+// Merged meshes for a chunk: plain vertex-coloured parts, and one mesh per textured surface
+function addMerged(group, list, material) {
+  const plain = list.filter((p) => !p.tex);
+  if (plain.length) group.add(new THREE.Mesh(mergeParts(plain), material));
+  const bySurface = {};
+  for (const p of list) if (p.tex) (bySurface[p.tex] ??= []).push(p);
+  for (const [name, ps] of Object.entries(bySurface)) group.add(new THREE.Mesh(mergeTextured(ps, SURFACES[name].tile), surfaceMaterial(name)));
+}
 
 // Fallen tree: log lying on the ground (pitched to the slope), branch stubs, and either an
 // uprooted root plate or the snapped stump. Colliders: capsule log, box plate, cylinder stump,
@@ -87,48 +97,6 @@ export function buildStructures(layout, chunks, colliders, material) {
     colliders.addOBB('fence', x, y, z, hx, hy, hz, yaw);
   }
 
-  // Hide & Seek hideouts: boxes merged with the rest, net panels as textured quads
-  const netQuads = chunks.groups.map(() => []);
-  for (const p of layout.parked) {
-    if (!p.shelter) continue;
-    const sh = buildShelter({ ...p.shelter, type: p.type, x: p.x, z: p.z, yaw: p.yaw }, heightAt, rand);
-    const ci = chunks.indexOf(p.x, p.z);
-    parts[ci].push(...sh.parts);
-    netQuads[ci].push(...sh.nets);
-    for (const c of sh.cols) {
-      if (c.t === 'obb') colliders.addOBB(c.kind, c.x, c.y, c.z, c.hx, c.hy, c.hz, c.yaw);
-      else if (c.t === 'cyl') colliders.addCylinder(c.kind, c.x, c.z, c.y0, c.y1, c.r);
-      else colliders.addCapsule(c.kind, c.ax, c.ay, c.az, c.bx, c.by, c.bz, c.r);
-    }
-  }
-  if (netQuads.some((q) => q.length)) {
-    // a bit lighter than vehicle nets: big vertical panels mostly see sky light and read as a black box otherwise
-    const netMat = new THREE.MeshLambertMaterial({ map: createNetTexture(layout.season), color: new THREE.Color().setScalar(1.3), alphaTest: 0.5, side: THREE.DoubleSide });
-    netQuads.forEach((quads, i) => {
-      if (!quads.length) return;
-      const pos = [];
-      const uv = [];
-      for (const q of quads) {
-        // uv in metres along the quad's edges
-        const a = new THREE.Vector3(...q[0]);
-        const du = a.distanceTo(new THREE.Vector3(...q[1])) / 1.6;
-        const dv = a.distanceTo(new THREE.Vector3(...q[3])) / 1.6;
-        const uvs = [[0, 0], [du, 0], [du, dv], [0, dv]];
-        for (const k of [0, 1, 2, 0, 2, 3]) {
-          pos.push(...q[k]);
-          uv.push(...uvs[k]);
-        }
-      }
-      const geo = new THREE.BufferGeometry();
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-      geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
-      geo.computeVertexNormals();
-      const mesh = new THREE.Mesh(geo, netMat);
-      mesh.castShadow = true;
-      chunks.groups[i].add(mesh);
-    });
-  }
-
   for (const f of layout.fallen ?? []) parts[chunks.indexOf(f.x, f.z)].push(...buildFallen(f, heightAt, rand, layout.season, colliders));
 
   // Utility poles along the main road (no wires yet)
@@ -148,9 +116,7 @@ export function buildStructures(layout, chunks, colliders, material) {
     colliders.addCylinder('pole', x, z, y, y + 9, 0.15);
   }
 
-  parts.forEach((list, i) => {
-    if (list.length) chunks.groups[i].add(new THREE.Mesh(mergeParts(list), material));
-  });
+  parts.forEach((list, i) => addMerged(chunks.groups[i], list, material));
 
   // Crater decals: dark scorched discs (big ones are also carved into the terrain)
   const craterGeo = new THREE.CircleGeometry(1, 10).rotateX(-Math.PI / 2);
@@ -169,4 +135,52 @@ export function buildStructures(layout, chunks, colliders, material) {
     mesh.computeBoundingSphere();
     chunks.groups[i].add(mesh);
   });
+}
+
+// Hide & Seek hideouts and their tracks (part of the enemy layer): wood, poles and earth merged per
+// chunk, nets with the camouflage-net material, faint transparent ruts
+const TRACK_OPACITY = { easy: 0.4, normal: 0.26, hard: 0.16 };
+export function buildShelters(layout, chunks, colliders, material) {
+  const hideouts = layout.hideouts ?? [];
+  if (!hideouts.length) return;
+  const { heightAt } = layout;
+  const parts = chunks.groups.map(() => []);
+  const ctx = {
+    heightAt,
+    groundColor: layout.groundColor,
+    season: layout.season,
+    treesNear: (x, z, r) => layout.trees.filter((t) => Math.abs(t.x - x) < r && Math.abs(t.z - z) < r),
+  };
+  const netMat = camoNetMaterial(layout.season);
+  for (const hd of hideouts) {
+    const sh = buildShelter(hd, ctx);
+    const ci = chunks.indexOf(hd.x, hd.z);
+    parts[ci].push(...sh.parts);
+    for (const geo of sh.nets) {
+      const mesh = new THREE.Mesh(geo, netMat);
+      mesh.castShadow = true;
+      mesh.userData.keepShadow = true;
+      chunks.groups[ci].add(mesh);
+    }
+    for (const geo of sh.earth) chunks.groups[ci].add(new THREE.Mesh(geo, material));
+    for (const c of sh.cols) {
+      if (c.t === 'obb') colliders.addOBB(c.kind, c.x, c.y, c.z, c.hx, c.hy, c.hz, c.yaw);
+      else if (c.t === 'cyl') colliders.addCylinder(c.kind, c.x, c.z, c.y0, c.y1, c.r);
+      else if (c.t === 'mesh') colliders.addMesh(c.kind, c.tris);
+      else colliders.addCapsule(c.kind, c.ax, c.ay, c.az, c.bx, c.by, c.bz, c.r);
+    }
+  }
+  parts.forEach((list, i) => {
+    if (list.length) chunks.groups[i].add(new THREE.Mesh(mergeParts(list), material));
+  });
+  const difficulty = hideouts[0].difficulty;
+  const trackMat = new THREE.MeshLambertMaterial({
+    color: layout.season === 'winter' ? 0x8a8278 : 0x3b3326, vertexColors: true, transparent: true, depthWrite: false,
+    opacity: TRACK_OPACITY[difficulty] ?? TRACK_OPACITY.normal, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2,
+  });
+  trackMat.userData.noCastShadow = true;
+  for (const t of layout.hideTracks ?? []) {
+    const [x, z] = t.pts[t.pts.length - 1];
+    chunks.groups[chunks.indexOf(x, z)].add(new THREE.Mesh(buildTrackGeometry(t, heightAt), trackMat));
+  }
 }

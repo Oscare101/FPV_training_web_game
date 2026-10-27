@@ -172,6 +172,8 @@ select { max-width: 100%; }
   padding: 7px 10px; border-radius: 6px; display: flex; gap: 10px; align-items: center;
 }
 .menu-nav button:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); border-color: transparent; }
+.menu-nav .nav-section { margin: 10px 6px 2px; font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted, #8b9688); }
+.group-note { margin: -2px 0 8px; font-size: 12px; color: var(--muted, #8b9688); }
 .menu-nav button.active { color: var(--text); background: rgba(156, 204, 74, 0.12); border-color: rgba(156, 204, 74, 0.35); }
 .nav-icon { width: 18px; text-align: center; color: var(--accent); }
 .menu-content { overflow: auto; padding: 4px 16px 24px; overscroll-behavior: contain; }
@@ -301,6 +303,7 @@ button.danger:hover { border-color: #ff8a60; }
   background: rgba(10, 14, 12, 0.72); border: 1px solid rgba(255, 255, 255, 0.14); color: #e9efe6; backdrop-filter: blur(6px);
 }
 .mm-chip:hover { border-color: var(--accent); }
+.mm-chip.attention { border-color: var(--warn); color: var(--warn); }
 .mm-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); box-shadow: 0 0 6px var(--warn); }
 .mm-dot.on { background: var(--accent); box-shadow: 0 0 6px var(--accent); }
 .mm-panel { position: absolute; right: 36px; top: 112px; bottom: 132px; width: min(440px, calc(100vw - 72px)); display: flex; flex-direction: column; }
@@ -368,6 +371,8 @@ button.danger:hover { border-color: #ff8a60; }
 .loading-bar { width: 220px; height: 3px; background: rgba(255, 255, 255, 0.08); position: relative; overflow: hidden; border-radius: 2px; }
 .loading-bar::after { content: ''; position: absolute; top: 0; bottom: 0; width: 40%; background: var(--accent); animation: loadbar 0.9s ease-in-out infinite; }
 @keyframes loadbar { from { left: -40%; } to { left: 100%; } }
+.loading.soft { z-index: 9; background: rgba(7, 10, 8, 0.55); backdrop-filter: blur(3px); animation: softin 0.15s ease-out; }
+@keyframes softin { from { opacity: 0; } }
 
 /* ---------- game HUD additions ---------- */
 .hud-stats { position: absolute; top: calc(var(--osd-margin, 20px) + 26px); left: 50%; transform: translateX(-50%); display: flex; gap: 18px; font-size: 15px; font-weight: 600; white-space: nowrap; }
@@ -383,6 +388,7 @@ button.danger:hover { border-color: #ff8a60; }
 .hud-feed .bad { border-right-color: #ff6b4a; }
 .briefing-cond { color: #c9e59a; text-transform: capitalize; }
 .mission-result button.primary { font-weight: 700; }
+.mission-result button:disabled { opacity: 0.35; cursor: not-allowed; border-color: #3d4a41; }
 .menu.stick-preview .ctl-grid { grid-template-columns: minmax(0, 1fr); }
 
 /* ---------- target guide ---------- */

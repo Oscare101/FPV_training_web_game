@@ -21,6 +21,17 @@ const CRASH_RESET_DELAY = 1; // s before a disarm resets a crashed quad
 const RC_SMOOTHING_HZ = 25; // per PT2 stage; sticks arrive once per frame, physics runs at 500 Hz
 const RC_SMOOTHING_K = STEP / (STEP + 1 / (2 * Math.PI * RC_SMOOTHING_HZ));
 const STICKS = ['roll', 'pitch', 'yaw', 'throttle'];
+// Ground contact points, body frame of the 5" model (m, scaled by size / 5): under the motors and
+// the bottom plate, the prop tips (tilted touchdowns), and the strike charge when one is carried.
+// The collision sphere is only for obstacles; on the ground the quad rests on these.
+const v3 = (a) => new THREE.Vector3(...a);
+const CONTACT_FRAME = [
+  [0.0795, -0.004, 0.0795], [-0.0795, -0.004, 0.0795], [0.0795, -0.004, -0.0795], [-0.0795, -0.004, -0.0795], [0, -0.004, 0],
+  [0.143, 0.028, 0.0795], [-0.143, 0.028, 0.0795], [0.143, 0.028, -0.0795], [-0.143, 0.028, -0.0795],
+  [0.0795, 0.028, 0.143], [-0.0795, 0.028, 0.143], [0.0795, 0.028, -0.143], [-0.0795, 0.028, -0.143],
+].map(v3);
+const CONTACT_CHARGE = [...CONTACT_FRAME, ...[[0, -0.072, -0.075], [0, -0.072, 0.065], [0, -0.04, -0.155], [0.032, -0.04, -0.01], [-0.032, -0.04, -0.01]].map(v3)];
+const REF_RADIUS = 0.12; // spec.radius of a 5"
 
 // Two cascaded first-order low-pass stages (like Betaflight's RC smoothing).
 class Pt2 {
@@ -45,6 +56,9 @@ const _fwd = new THREE.Vector3();
 const _level = new THREE.Quaternion();
 const _yAxis = new THREE.Vector3(0, 1, 0);
 const _spawn = new THREE.Vector3();
+const _c = new THREE.Vector3();
+const _n = new THREE.Vector3();
+const _tilt = new THREE.Quaternion();
 
 // Owns the drone: input -> rates, arming, fixed-step physics, collisions, crash/reset.
 export class FlightController {
@@ -56,6 +70,7 @@ export class FlightController {
     this.wind = new Wind();
     this.drone = new Drone(buildSpec(settings.data.drone));
     this.env = { wind: new THREE.Vector3(), torque: new THREE.Vector3(), groundHeight: 0 };
+    this.contactDrop = 0;
 
     this.status = 'disarmed'; // 'disarmed' | 'armed' | 'crashed' | 'detonated'
     // Hooks for missions: onImpact(hit, drone) -> true to detonate instead of crash; onReset()
@@ -98,6 +113,7 @@ export class FlightController {
     const ground = this.world.heightAt(position.x, position.z);
     this.drone.reset(_spawn.set(position.x, ground + this.drone.spec.radius, position.z), yaw);
     this.drone.payloadMass = this.settings.data.drone.payload;
+    this.drone.position.y -= this.contactClearance(); // standing on its frame (or the charge)
     this.status = 'disarmed';
     this.flightTime = 0;
     this.accumulator = 0;
@@ -177,7 +193,8 @@ export class FlightController {
     this.accumulator += dt;
     let steps = 0;
     while (this.accumulator >= STEP && steps < MAX_STEPS) {
-      env.groundHeight = this.surfaceAt(d.position.x, d.position.z);
+      // ground effect and wind see the same height as before contact points: resting = one radius
+      env.groundHeight = this.surfaceAt(d.position.x, d.position.z) + this.contactDrop - d.spec.radius;
       const agl = d.position.y - env.groundHeight;
       this.wind.step(STEP);
       this.wind.velocityAt(agl, env.wind);
@@ -213,15 +230,15 @@ export class FlightController {
     const hit = this.world.hitTest(p, r);
     if (hit) return this.onImpact?.(hit, d) ? this.detonate() : this.crash(hit.kind);
 
+    const clearance = this.contactClearance();
     // liquid water: always a crash (frozen water counts as ground)
     const water = this.world.waterAt?.(p.x, p.z) ?? null;
-    if (water !== null && !this.world.waterFrozen && p.y < water + r) {
+    if (water !== null && !this.world.waterFrozen && p.y - this.contactDrop < water) {
       this.waterHit.vDown = -v.y;
       this.waterHit.skid = Math.hypot(v.x, v.z);
       return this.onImpact?.(this.waterHit, d) ? this.detonate() : this.crash('water');
     }
-    const ground = water !== null && this.world.waterFrozen ? Math.max(water, this.world.heightAt(p.x, p.z)) : this.world.heightAt(p.x, p.z);
-    if (p.y < ground + r) {
+    if (clearance < 0) {
       _up.set(0, 1, 0).applyQuaternion(d.quaternion);
       const g = this.groundHit;
       g.vDown = -v.y;
@@ -229,14 +246,18 @@ export class FlightController {
       g.hard = g.vDown > LANDING_MAX_VSPEED || g.skid > LANDING_MAX_HSPEED || _up.y < LANDING_MIN_UP;
       if (this.onImpact?.(g, d)) return this.detonate();
       if (g.hard) return this.crash('ground');
-      p.y = ground + r;
+      p.y -= clearance;
       if (v.y < 0) v.y = -v.y > BOUNCE_MIN_VSPEED ? -v.y * BOUNCE_RESTITUTION : 0;
       const f = Math.exp(-STEP * GROUND_FRICTION);
       v.x *= f;
       v.z *= f;
       if (d.motor < 0.3) {
         _fwd.set(0, 0, -1).applyQuaternion(d.quaternion);
+        // settle flat on the slope under it, keeping the heading
         _level.setFromAxisAngle(_yAxis, Math.atan2(-_fwd.x, -_fwd.z));
+        const e = 0.3;
+        _n.set(this.solidAt(p.x - e, p.z) - this.solidAt(p.x + e, p.z), 2 * e, this.solidAt(p.x, p.z - e) - this.solidAt(p.x, p.z + e)).normalize();
+        _level.premultiply(_tilt.setFromUnitVectors(_yAxis, _n));
         d.quaternion.slerp(_level, 1 - Math.exp(-STEP * GROUND_SETTLE));
       }
     }
@@ -261,6 +282,32 @@ export class FlightController {
     return true;
   }
 
+  // What the quad can stand on: ground, or ice
+  solidAt(x, z) {
+    const ground = this.world.heightAt(x, z);
+    if (!this.world.waterFrozen) return ground;
+    const water = this.world.waterAt?.(x, z) ?? null;
+    return water === null ? ground : Math.max(ground, water);
+  }
+
+  // Height of the lowest contact point above what's under it (negative = touching / sinking in);
+  // also sets contactDrop: how far the body centre sits above that point
+  contactClearance() {
+    const d = this.drone;
+    const p = d.position;
+    const k = d.spec.radius / REF_RADIUS;
+    let min = Infinity;
+    for (const c of d.payloadMass > 0 ? CONTACT_CHARGE : CONTACT_FRAME) {
+      _c.copy(c).multiplyScalar(k).applyQuaternion(d.quaternion);
+      const clear = p.y + _c.y - this.solidAt(p.x + _c.x, p.z + _c.z);
+      if (clear < min) {
+        min = clear;
+        this.contactDrop = -_c.y;
+      }
+    }
+    return min;
+  }
+
   // Ground or water surface height
   surfaceAt(x, z) {
     const ground = this.world.heightAt(x, z);
@@ -270,7 +317,7 @@ export class FlightController {
 
   get altitude() {
     const p = this.drone.position;
-    return p.y - this.surfaceAt(p.x, p.z) - this.drone.spec.radius;
+    return p.y - this.surfaceAt(p.x, p.z) - this.contactDrop;
   }
 
   get speed() {

@@ -5,15 +5,21 @@ import { SHELTER_LABEL } from '../world/shelters.js';
 const STATIC_TIME = 0.6;
 const CRASH_RESPAWN = 1.2;
 const END_DELAY = 2.5;
-const NEAR = 45; // m: inside this the hint says "ENEMY NEAR" instead of pointing
-const HINT_OFFSET = { easy: 15, normal: 30, hard: 50 }; // m off the real position
+// Direction hint per difficulty: offset (m) of the point it shows from the hideouts, distance
+// rounding (0 = none), and how close to a hideout it switches to "ENEMY NEAR" and stops pointing
+const HINT = {
+  easy: { offset: 0, round: 10, near: 20 }, // straight at the (only) hideout
+  normal: { offset: 25, round: 25, near: 50 },
+  hard: { offset: 60, round: 0, near: 90 },
+};
 const SCORES_KEY = 'fpv-trainer.hide.best';
 const COMPASS = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
 const HOW_IN = {
-  nets: 'Net roof with a hole, closed sides, a flap over the front with a gap underneath.',
-  barn: 'Plank shed: get in through the door, a window or a hole in the roof. Walls stop a blast.',
-  dugout: 'Earth berms and a log roof stop a blast; the only way in is the low front.',
+  net: 'A camouflage net over poles, pegged to the ground. Look for where it was left loose: an end tied up, a side that doesn\'t reach the ground, a tear.',
+  dugout: 'A pit under a log-and-earth roof: earth stops a blast. The only way in is the ramp at the back.',
+  building: 'Parked inside a farm shed or garage: brick walls stop a blast. Get in through a gate, a broken window or a shell hole in the roof.',
 };
+const SETTING = { treeline: 'by a tree line', forest: 'at a forest edge', village: 'in a village yard', ravine: 'in a ravine', field: 'in the open' };
 
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 function loadScores() {
@@ -60,9 +66,14 @@ export class HideSeek {
     this.shelter = conditions.shelter;
     this.conditions = conditions;
     this.target = this.world.vehicles.list.find((v) => v.home?.shelter) ?? this.world.vehicles.list[0];
+    // the hint points at the area of all the hideouts (it doesn't tell which one is occupied)
+    this.hideouts = this.world.layout.hideouts?.length ? this.world.layout.hideouts : [this.target];
+    const cx = this.hideouts.reduce((s, h) => s + h.x, 0) / this.hideouts.length;
+    const cz = this.hideouts.reduce((s, h) => s + h.z, 0) / this.hideouts.length;
     const a = Math.random() * Math.PI * 2;
-    const off = HINT_OFFSET[this.difficulty] * (0.5 + Math.random() * 0.5);
-    this.hint = { x: this.target.x + Math.cos(a) * off, z: this.target.z + Math.sin(a) * off };
+    this.hintCfg = HINT[this.difficulty] ?? HINT.normal;
+    const off = this.hintCfg.offset * (0.6 + Math.random() * 0.4);
+    this.hint = { x: cx + Math.cos(a) * off, z: cz + Math.sin(a) * off };
     this.retry();
   }
 
@@ -113,7 +124,11 @@ export class HideSeek {
     const before = this.target.state;
     const r = this.fx.detonate(hit, drone);
     if (this.target.state !== before) this.hud.feed(`${this.target.label} ${this.target.state}${r.struck === this.target ? ` · ${r.zone}` : hit.kind === 'net' ? ' · through the net' : ' · blast'}`, this.target.state === 'destroyed' ? 'good' : 'warn');
-    else this.hud.feed(hit.kind === 'net' ? 'Caught in the net · no effect' : hit.kind === 'vehicle' ? 'Hit · no further effect' : `Detonated on ${hit.kind} · no effect`, 'bad');
+    else if (hit.kind === 'net') {
+      // fast into a net: the fuse fires on the net, short of the hull (a slow touch tangles instead)
+      const d = this.world.vehicles.distanceTo(this.target, r.pos);
+      this.hud.feed(`Charge went off on the net, ${d.toFixed(1)} m from the ${this.target.label.toLowerCase()} · no damage`, 'bad');
+    } else this.hud.feed(hit.kind === 'vehicle' ? 'Hit · no further effect' : `Detonated on ${hit.kind} · no effect`, 'bad');
     this.state = 'impact';
     this.timer = 0;
   }
@@ -173,7 +188,8 @@ export class HideSeek {
     if (flying) {
       hud.charge(this.chargeArmed);
       const p = this.flight.drone.position;
-      hud.hint(p, this.hint.x, this.hint.z, Math.hypot(this.target.x - p.x, this.target.z - p.z) < NEAR);
+      const near = this.hideouts.some((h) => Math.hypot(h.x - p.x, h.z - p.z) < this.hintCfg.near);
+      hud.hint(p, this.hint.x, this.hint.z, near, this.hintCfg.round);
     }
     if (this.state === 'ready' && this.drones === 0 && !this.started) hud.briefing(`hide-${this.attemptKey}`, this.briefingHtml());
     if (this.state === 'impact') hud.staticFeed('NEXT DRONE');
@@ -185,7 +201,8 @@ export class HideSeek {
     const dz = this.hint.z - this.launch.z;
     const b = ((Math.atan2(dx, -dz) * 180) / Math.PI + 360) % 360;
     return `<b>HIDE &amp; SEEK — ${this.difficulty.toUpperCase()}</b><br>
-      ${/^[AEIOU]/.test(this.target.label) ? 'An' : 'A'} <b>${/^[A-Z]{3}$/.test(this.target.label) ? this.target.label : this.target.label.toLowerCase()}</b> is dug in in a <b>${SHELTER_LABEL[this.shelter]}</b>, ~${Math.round(Math.hypot(dx, dz) / 10) * 10} m ${COMPASS[Math.round(b / 45) % 8]}. It won't move.<br>
+      ${/^[AEIOU]/.test(this.target.label) ? 'An' : 'A'} <b>${/^[A-Z]{3}$/.test(this.target.label) ? this.target.label : this.target.label.toLowerCase()}</b> is hidden ${this.shelter === 'net' ? 'under a' : 'in a'} <b>${SHELTER_LABEL[this.shelter]}</b> ~${Math.round(Math.hypot(dx, dz) / 10) * 10} m ${COMPASS[Math.round(b / 45) % 8]}. It won't move.<br>
+      ${this.hideouts.length > 1 ? `Recon found <b>${this.hideouts.length} hideouts</b> there; only one is occupied. Faint tracks lead to each of them.<br>` : 'Faint tracks lead to it from the nearest road.<br>'}
       ${HOW_IN[this.shelter]} Fly slowly and find the way in. Nets catch the drone: fast = the charge goes off on the net.<br>
       Unlimited drones · charge arms ${CHARGE_ARM_DISTANCE} m from launch · X / detonate switch = manual`;
   }

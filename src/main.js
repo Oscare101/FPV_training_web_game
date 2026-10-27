@@ -11,9 +11,9 @@ import { GameHud } from './ui/GameHud.js';
 import { Osd } from './ui/Osd.js';
 import { FpsCounter } from './ui/FpsCounter.js';
 import { AudioEngine } from './audio/AudioEngine.js';
-import { Game, LiveSettings, MODE_NAMES, GLOBAL_PAGES, LOCKED_PAGES, FREE_SETUP_PAGES } from './game/Game.js';
+import { Game, LiveSettings, MODE_NAMES, GLOBAL_PAGES, LOCKED_PAGES, FREE_SETUP_PAGES, CONDITION_PAGES } from './game/Game.js';
 import { generateLayout } from './world/gen/layout.js';
-import { mapKeyOf } from './game/conditions.js';
+import { mapKeyOf, enemyKeyOf } from './game/conditions.js';
 import { captureScreenshot, snapshotDataUrl, screenshotToast } from './ui/Screenshot.js';
 import { createStickPreview } from './ui/stickPreview.js';
 
@@ -57,13 +57,15 @@ const settingsMenu = new SettingsMenu(settings, document.body, {
   onClose: () => {
     // back to where it was opened from
     if (game.playing) pauseMenuShow();
+    else if (game.mode !== mainMenu.selected) game.setMode(mainMenu.selected); // the menu shows the selected mode again
   },
 });
 game = new Game({
   settings, live, world, flight, audio, hud,
   ui: {
-    loading(text) {
+    loading(text, soft = false) {
       loading.hidden = !text;
+      loading.classList.toggle('soft', soft);
       if (text) loading.querySelector('span').textContent = text;
     },
     status: (text) => settingsMenu.setStatus(text),
@@ -79,6 +81,11 @@ const mainMenu = new MainMenu(settings, document.body, {
   onFreeSetup: () => {
     game.setMode('free');
     settingsMenu.open('free', { allowed: FREE_SETUP_PAGES, title: 'Free Flight' });
+  },
+  // the scene behind shows the Custom conditions (the Free Flight map) while editing them
+  onConditions: () => {
+    game.setMode('free');
+    settingsMenu.open('weather', { allowed: CONDITION_PAGES, title: 'Custom conditions' });
   },
   onSelect: (mode) => game.setMode(mode), // the menu background shows that mode's weather and time
 });
@@ -102,11 +109,11 @@ function pauseMenuShow() {
 }
 
 game.builtKey = mapKeyOf(live.data.map);
+game.builtEnemyKey = enemyKeyOf(live.data.map);
 game.lastBuiltMode = 'free';
 game.syncVehicles();
 mainMenu.select(settings.data.game.mode);
-mainMenu.show();
-if (!input.config.calibrated) settingsMenu.open('controller', { allowed: GLOBAL_PAGES, title: 'Settings' });
+mainMenu.show(); // always the main menu first; the controller chip there says if it still needs setting up
 
 window.addEventListener('keydown', (e) => {
   if (e.repeat) return;
@@ -136,7 +143,7 @@ window.addEventListener('keydown', (e) => {
     return;
   }
   if (e.code === 'KeyX') game.requestDetonate();
-  if (e.code === 'Enter' && !hud.el.result.hidden) game.action(game.mode === 'hunt' ? 'again' : game.mode === 'hide' ? 'next' : 'retry');
+  if (e.code === 'Enter' && !hud.el.result.hidden && hud.primaryAction) game.action(hud.primaryAction);
   if (game.mode === 'free') {
     if (e.code === 'KeyN') {
       const t = settings.data.env.timeOfDay;
@@ -193,7 +200,7 @@ function frame(now) {
   // camera
   const d = flight.drone;
   const size = live.data.drone.size;
-  const payload = live.data.drone.payload > 0;
+  const payload = flight.drone.payloadMass > 0; // gone after a drop
   const preview = settingsMenu.activePreview;
   if (preview === 'sticks') {
     const l = world.layout.launch;

@@ -41,8 +41,13 @@ export function createGrass(layout) {
   const colorData = new Uint8Array(pn * pn * 4);
   const heightData = new Uint8Array(pn * pn * 4);
   const col = new THREE.Color();
-  for (let iz = 0; iz < pn; iz++) {
-    for (let ix = 0; ix < pn; ix++) {
+  const fill = (ix0, iz0, ix1, iz1) => {
+    for (let iz = iz0; iz < iz1; iz++) {
+      for (let ix = ix0; ix < ix1; ix++) param(ix, iz);
+    }
+  };
+  const param = (ix, iz) => {
+    {
       const x = -half + (ix + 0.5) * PARAM_CELL;
       const z = -half + (iz + 0.5) * PARAM_CELL;
       const [density, h] = layout.grassAt(x, z);
@@ -54,7 +59,8 @@ export function createGrass(layout) {
       colorData[i + 3] = density * 255;
       heightData[i] = Math.min(255, (h / 2) * 255);
     }
-  }
+  };
+  fill(0, 0, pn, pn);
   const colorTex = new THREE.DataTexture(colorData, pn, pn, THREE.RGBAFormat);
   colorTex.magFilter = THREE.LinearFilter;
   colorTex.needsUpdate = true;
@@ -224,6 +230,14 @@ export function createGrass(layout) {
     update(camera, dt, wind, wash) {
       nearLayer.update(camera, dt, wind, wash);
       farLayer.update(camera, dt, wind, wash);
+    },
+    // The ground changed in these areas [x0, z0, x1, z1] (enemy earthworks): re-read it
+    refresh(boxes) {
+      heightTex.needsUpdate = true;
+      const cellOf = (v) => Math.min(pn, Math.max(0, Math.floor((v + half) / PARAM_CELL)));
+      for (const [x0, z0, x1, z1] of boxes) fill(cellOf(x0), cellOf(z0), cellOf(x1) + 1, cellOf(z1) + 1);
+      colorTex.needsUpdate = true;
+      paramTex.needsUpdate = true;
     },
     dispose() {
       nearLayer.dispose();

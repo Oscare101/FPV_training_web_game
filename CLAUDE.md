@@ -7,13 +7,13 @@ Inspiration / comparison: Velocidrone (but with moving targets, varied locations
 ## Hard requirements
 - Runs in **Chrome** on a **MacBook Air M1**. Target a stable 60 fps. Performance matters more than visual detail.
 - Stack: **Three.js + Vite** (npm). Custom drone physics (no general-purpose physics engine unless needed for collisions).
-- **Low-poly** graphics, all models generated in code (no external asset downloads).
+- **Low-poly** graphics, models generated in code. Small CC0 textures bundled in `public/textures` are allowed (credited in `CREDITS.md`); no runtime downloads.
 - UI language: **English**.
 - Controller: RadioMaster Pocket (EdgeTX) in **USB Joystick mode** via the browser **Gamepad API**. Axis order can vary, so mapping must be configurable.
 - Flight mode: **Acro (rate mode) only**. No angle/horizon mode.
 
-## Phase 1 (current): just fly — physics first
-Focus on flight feel. **No gameplay, scoring or mission logic yet.**
+## Phase 1 (done): just fly — physics first
+Flight feel came first. Since then game modes were added with the user (Free Flight, Strike Missions, Hunt, Hide & Seek).
 1. Project setup (Vite + Three.js), clean module structure.
 2. Controller: detection, live axis display, axis mapping + invert, calibration (min/center/max), deadzone.
 3. Rates: Betaflight-style (RC rate, super rate, expo) per axis. The user may provide his Velocidrone rates to copy.
@@ -31,7 +31,7 @@ Focus on flight feel. **No gameplay, scoring or mission logic yet.**
 8. Simple OSD: battery, throttle, speed, altitude, timer.
 9. Keyboard fallback for testing without the controller.
 
-## Later phases (do NOT forget, do NOT build yet)
+## Later phases (do NOT forget; discuss with the user before building)
 - **Sound**: motor sound that changes with throttle, explosions.
 - Drone types: kamikaze, bomber (payload drop), fiber-optic (no jamming, cable length limit, snags on trees), interceptor.
 - Video signal model: analog static with distance and obstacles, EW jamming zones.

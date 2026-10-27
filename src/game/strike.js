@@ -15,6 +15,8 @@ const COVER = new Set(['building', 'wreck', 'cover']); // stop blast and fragmen
 const PATH_STEP = 0.3; // m
 
 // Does this impact set off the charge? (soft landings and slow net contacts don't)
+const NET_ON_HULL = 0.35; // m: a net this close to the hull counts as a hit on the hull
+
 export function fuseTriggered(hit, drone) {
   if (hit.kind === 'net') return drone.velocity.length() > NET_FUSE_SPEED;
   return !(hit.kind === 'ground' && !hit.hard && hit.vDown < FUSE_VSPEED && hit.skid < FUSE_SKID);
@@ -82,6 +84,8 @@ export function createStrikeFx(world, audio) {
     const vehicles = world.vehicles;
     const before = new Map(vehicles.list.map((v) => [v, v.state]));
     const out = { pos, struck: null, zone: null, obstacle: null, changed: [], destroyed: 0 };
+    // a net lying on the armour gives no standoff: the charge goes off on the hull under it
+    if (hit.kind === 'net') hit = vehicles.hits(pos, drone.spec.radius + NET_ON_HULL, true) ?? hit;
     if (hit.kind === 'vehicle') {
       out.struck = hit.vehicle;
       out.zone = hit.zone;

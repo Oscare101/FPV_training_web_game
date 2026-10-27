@@ -66,7 +66,7 @@ const vertexShader = /* glsl */ `
   }`;
 
 const fragmentShader = /* glsl */ `
-  uniform vec3 zenith, horizonSun, horizonAway, groundColor, sunDir, sunColor, cloudTint, fogColor;
+  uniform vec3 zenith, horizonSun, horizonAway, sunDir, sunColor, cloudTint, fogColor;
   uniform float glow, disc, clouds, cloudLight, cloudDark, fogAmount;
   uniform vec2 drift;
   varying vec3 vDir;
@@ -81,7 +81,8 @@ const fragmentShader = /* glsl */ `
     float toward = pow(max(dot(hd, hs), 0.0) * 0.5 + 0.5, 3.0);
     vec3 horizon = mix(horizonAway, horizonSun, toward);
     vec3 col = mix(horizon, zenith, pow(clamp(h, 0.0, 1.0), 0.45));
-    if (h < 0.0) col = mix(horizon, groundColor, clamp(-h * 5.0, 0.0, 1.0));
+    // below the horizon the dome only shows past the view distance (nothing is drawn there): fog
+    if (h < 0.0) col = fogColor;
     float sd = max(dot(d, sunDir), 0.0);
     col += sunColor * glow * (pow(sd, 1200.0) * 9.0 * disc + pow(sd, 18.0) * 0.22 + pow(sd, 3.0) * 0.07);
     if (h > 0.0 && clouds > 0.0) {
@@ -109,7 +110,6 @@ export function createSky(scene) {
     zenith: { value: new THREE.Color() },
     horizonSun: { value: new THREE.Color() },
     horizonAway: { value: new THREE.Color() },
-    groundColor: { value: new THREE.Color() },
     sunDir: { value: new THREE.Vector3() },
     sunColor: { value: new THREE.Color() },
     cloudTint: { value: new THREE.Color() },
@@ -171,7 +171,6 @@ export function createSky(scene) {
     const bright = 1 - state.dark * 0.92;
     const grey = _a.setRGB(0.55, 0.58, 0.62).multiplyScalar(bright * (1 - storm * 0.35));
     for (const c of [uniforms.zenith.value, uniforms.horizonSun.value, uniforms.horizonAway.value]) c.lerp(grey, overcast * 0.85);
-    uniforms.groundColor.value.copy(uniforms.horizonAway.value).multiplyScalar(0.55);
     state.horizon.copy(uniforms.horizonAway.value).lerp(uniforms.horizonSun.value, 0.35);
 
     // light: sun by day, moon at night

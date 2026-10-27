@@ -39,7 +39,7 @@ export class PauseMenu {
       ['resume', 'Resume', true],
       ['restart', { free: 'Drone back to the pad', strike: 'Retry mission', hunt: 'Restart the hunt', hide: 'Retry this hideout' }[mode]],
       ...(free && enemies ? [['reset-enemies', 'Reset enemies']] : []),
-      ...(free ? [['free-setup', 'Map, weather & enemies']] : []),
+      ...(free ? [['free-setup', 'Enemies & custom conditions']] : []),
       ['settings', 'Settings'],
       ['controller', 'Controller'],
       ['menu', 'Exit to main menu'],

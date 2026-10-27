@@ -1,5 +1,5 @@
 import { generateLayout } from '../world/gen/layout.js';
-import { effectiveSettings, mapKeyOf, rollStrikeConditions } from './conditions.js';
+import { effectiveSettings, mapKeyOf, enemyKeyOf, enemyOptionsOf, rollStrikeConditions } from './conditions.js';
 import { createStrikeFx } from './strike.js';
 import { FreeFlight } from './FreeFlight.js';
 import { StrikeMission } from './StrikeMission.js';
@@ -12,7 +12,8 @@ export const MODE_NAMES = { free: 'Free Flight', strike: 'Strike Missions', hunt
 // change the game (map, weather, drone and enemies are set before starting)
 export const GLOBAL_PAGES = ['drone', 'rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
 export const LOCKED_PAGES = ['rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
-export const FREE_SETUP_PAGES = ['free', 'weather', 'map'];
+export const FREE_SETUP_PAGES = ['free'];
+export const CONDITION_PAGES = ['weather', 'map']; // "Custom conditions"
 
 // The settings the world, drone and audio run on: the player's settings with the active mode's
 // map, weather and rules on top. Subscribe with onChange like Settings. Create it right after
@@ -54,6 +55,15 @@ export class Game {
     this.lastBuiltMode = null;
     this.pendingRebuild = false;
     this.rebuildTimer = 0;
+    this.enemyTimer = 0;
+    this.builtEnemyKey = '';
+    // a map rebuild waits until a slider is let go (no rebuild per slider step)
+    this.pointerDown = false;
+    window.addEventListener('pointerdown', () => (this.pointerDown = true), true);
+    window.addEventListener('pointerup', () => {
+      this.pointerDown = false;
+      if (this.rebuildWaiting) this.scheduleRebuild(150);
+    }, true);
     const fx = createStrikeFx(world, audio);
     this.fx = fx;
     const ctx = { flight, world, settings, fx, hud };
@@ -102,23 +112,48 @@ export class Game {
   settingsChanged() {
     this.syncVehicles();
     const key = mapKeyOf(this.data.map);
-    if (key === this.builtKey) return;
-    if (this.mode !== 'free') {
-      if (this.playing) this.pendingRebuild = true; // e.g. terrain detail changed mid-mission: next round
-      return; // behind the menu a mission/hunt map is only built on Play
+    if (key !== this.builtKey) {
+      if (this.mode !== 'free') {
+        if (this.playing) this.pendingRebuild = true; // e.g. terrain detail changed mid-mission: next round
+        return; // behind the menu a mission/hunt map is only built on Play
+      }
+      // Free Flight (playing or behind the menu): rebuild in place once the slider is let go
+      this.ui.status('Map changes pending…');
+      clearTimeout(this.enemyTimer);
+      if (this.pointerDown) this.rebuildWaiting = true;
+      else this.scheduleRebuild(600); // keyboard: after the last step
+      return;
     }
-    // Free Flight (playing or behind the menu): rebuild in place, debounced for sliders
-    this.ui.status('Map changes pending…');
+    // Only enemies changed: swap the enemy layer on the same map, live (short debounce while dragging)
+    if (this.mode === 'free' && enemyKeyOf(this.data.map) !== this.builtEnemyKey) {
+      clearTimeout(this.enemyTimer);
+      this.enemyTimer = setTimeout(() => this.rebuildEnemies(), 120);
+    }
+  }
+
+  scheduleRebuild(delay) {
+    this.rebuildWaiting = false;
     clearTimeout(this.rebuildTimer);
     this.rebuildTimer = setTimeout(() => {
-      this.ui.status('Rebuilding map…');
-      setTimeout(() => {
+      if (this.pointerDown) {
+        this.rebuildWaiting = true;
+        return;
+      }
+      if (mapKeyOf(this.data.map) === this.builtKey) return this.ui.status('');
+      this.withLoading('Generating map…', () => {
         this.buildMap(this.data.map.seed);
         this.flight.reset();
         if (this.playing) this.active.begin?.();
         this.ui.status('');
-      }, 40);
-    }, 450);
+      }, true);
+    }, delay);
+  }
+
+  rebuildEnemies() {
+    if (this.mode !== 'free' || mapKeyOf(this.data.map) !== this.builtKey) return;
+    this.world.rebuildEnemies(enemyOptionsOf(this.data.map));
+    this.builtEnemyKey = enemyKeyOf(this.data.map);
+    if (this.playing) this.active.enemiesChanged?.();
   }
 
   // ---------- map ----------
@@ -127,12 +162,14 @@ export class Game {
     const s = seed || Math.floor(Math.random() * 1e9);
     this.world.build(generateLayout(s, this.data.map), { vegDetail: this.data.map.vegDetail });
     this.builtKey = mapKeyOf(this.data.map);
+    this.builtEnemyKey = enemyKeyOf(this.data.map);
     this.pendingRebuild = false;
   }
 
-  // Shows the loading screen, lets it paint, then runs fn (map builds block for ~1 s)
-  withLoading(text, fn) {
-    this.ui.loading(text);
+  // Shows the loading screen, lets it paint, then runs fn (map builds block for ~1 s);
+  // soft: a see-through veil over the scene only (settings stay visible on top)
+  withLoading(text, fn, soft = false) {
+    this.ui.loading(text, soft);
     setTimeout(() => {
       fn();
       this.ui.loading(null);
@@ -143,6 +180,8 @@ export class Game {
 
   start(mode) {
     clearTimeout(this.rebuildTimer);
+    clearTimeout(this.enemyTimer);
+    this.rebuildWaiting = false;
     this.paused = false;
     this.hud.clearFeed();
     let notice = '';

@@ -144,6 +144,24 @@ export function createTerrainLod(layout, chunks, material) {
 
   return {
     levels,
+    // The ground changed in these areas [x0, z0, x1, z1]: rebuild the chunks touching them now
+    invalidate(boxes) {
+      const hs = chunks.chunkSize / 2 + cell;
+      state.forEach((st, ci) => {
+        const g = chunks.groups[ci];
+        const { cx, cz } = g.userData;
+        if (!boxes.some(([x0, z0, x1, z1]) => x1 > cx - hs && x0 < cx + hs && z1 > cz - hs && z0 < cz + hs)) return;
+        if (job?.ci === ci) job = null;
+        const level = st.level;
+        for (const m of st.meshes.values()) {
+          g.remove(m);
+          m.geometry.dispose();
+        }
+        st.meshes.clear();
+        st.level = -1;
+        if (level >= 0) show(ci, level);
+      });
+    },
     // Build everything near (x, z) right away (no budget), coarse elsewhere
     prime(x, z, detailDistance) {
       state.forEach((_, ci) => show(ci, levelFor(ci, x, z, detailDistance)));

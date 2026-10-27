@@ -35,6 +35,8 @@ export const MAP_DEFAULTS = {
   burned: 0.5, // burnt land patches (charred trees, black ground), scales their number
   fallenTrees: 1, // density multiplier
   whitewash: 0.35, // winter: share of vehicles with improvised white paint
+  farms: 1, // collective-farm yards (long sheds, garage blocks) near the village
+  hideouts: 0.35, // share of parked vehicles under a draped camo net or in a dugout (where there's room)
 };
 
 export const SEASONS = ['spring', 'summer', 'autumn', 'winter'];
@@ -94,6 +96,12 @@ const COLORS = {
 const VEHICLE_WEIGHTS = { tank: 0.2, ifv: 0.2, apc: 0.15, truck: 0.3, car: 0.15 };
 const HALF_WIDTH = { tank: 1.75, ifv: 1.45, apc: 1.48, truck: 1.25, car: 0.95, ammo: 1.45 }; // for placing trees beside them
 const HALF_LENGTH = { tank: 3.5, ifv: 3.45, apc: 3.75, truck: 3.85, car: 2.15, ammo: 1.1 };
+const HEIGHT = { tank: 2.3, ifv: 2.3, apc: 2.5, truck: 3.5, car: 1.85, ammo: 1.3 };
+// Vehicle pit (dugout) around a vehicle type: inner half width/length, depth, ramp length (m)
+export function dugoutDims(type) {
+  const depth = Math.min(1.7, HEIGHT[type] * 0.62);
+  return { pw: HALF_WIDTH[type] + 0.7, pl: HALF_LENGTH[type] + 0.8, depth, ramp: depth * 2.6, roofY: HEIGHT[type] - depth + 0.3 };
+}
 
 // Byte raster at a fixed cell size, for O(1) "is there a road/tree line here" lookups.
 function createRaster(size, cell) {
@@ -118,6 +126,9 @@ function createRaster(size, cell) {
           if (i >= 0 && data[i] < value) data[i] = value;
         }
       }
+    },
+    clear() {
+      data.fill(0);
     },
     stampLine(x1, z1, x2, z2, r, value) {
       const len = Math.hypot(x2 - x1, z2 - z1);
@@ -350,7 +361,7 @@ export function generateLayout(seed, options = {}) {
     const nz = ((x1 - x0) / len) * side;
     const x = x1 + nx * r(24, 30);
     const z = z1 + nz * r(24, 30);
-    houses.push({ kind: 'barn', x, z, w: r(9, 12), d: r(16, 22), h: r(3.8, 4.8), yaw: Math.atan2(-(x1 - x0), -(z1 - z0)), ruined: chance(o.ruins), back: [nx, nz] });
+    houses.push({ kind: 'barn', x, z, w: r(10, 12), d: r(18, 24), h: r(3.8, 4.6), yaw: Math.atan2(-(x1 - x0), -(z1 - z0)), ruined: chance(o.ruins), back: [nx, nz] });
     yardMask.stamp(x, z, 16, 1);
   }
 
@@ -511,6 +522,132 @@ export function generateLayout(seed, options = {}) {
     }
     return v;
   };
+
+  // ---------- collective-farm yard: long sheds and a machinery garage ----------
+  // Real sizes, so vehicles fit inside: sheds 12-15 m wide and 30-54 m long with 4 m gates at the
+  // ends, a garage block with 4 m steel gates in a row. Gates open, half-open, closed or gone; shell
+  // holes in the roofs. Crews park vehicles inside (enemy layer: `slots`, nose to the gate).
+  const GATE_STATES = { open: 0.25, half: 0.3, closed: 0.3, gone: 0.15 };
+  const localToWorld = (h, lx, lz) => [h.x + lx * Math.cos(h.yaw) + lz * Math.sin(h.yaw), h.z - lx * Math.sin(h.yaw) + lz * Math.cos(h.yaw)];
+  function designShed(h) {
+    h.wallTex = pickWeighted({ brick: 0.45, silicate: 0.35, plaster: 0.2 });
+    const gh = Math.min(4.2, h.h - 0.3);
+    h.gates = [-1, 1].map((end) => ({ face: end < 0 ? 'z-' : 'z+', at: 0, w: 4, h: gh, state: h.ruined && chance(0.5) ? 'gone' : pickWeighted(GATE_STATES) }));
+    if (h.d > 36 && chance(0.5)) h.gates.push({ face: chance(0.5) ? 'x-' : 'x+', at: r(-h.d / 5, h.d / 5), w: 4, h: gh, state: pickWeighted(GATE_STATES) });
+    // a row of small high windows along both long walls, many panes long gone
+    const broken = h.ruined ? r(0.6, 1) : r(0.2, 0.7);
+    h.windows = [];
+    for (const face of ['x-', 'x+']) {
+      for (let at = -h.d / 2 + 3; at <= h.d / 2 - 3; at += 4) {
+        if (h.gates.some((g) => g.face === face && Math.abs(g.at - at) < 3.5)) continue;
+        h.windows.push({ face, at, w: 1.4, h: 0.8, sill: Math.min(2.2, h.h - 1.2), broken: chance(broken) });
+      }
+    }
+    h.holes = [];
+    for (let k = 0, n = h.ruined ? 2 + Math.floor(rand() * 3) : Math.floor(rand() * 2.5); k < n; k++) {
+      h.holes.push({ lz: r(-h.d / 2 + 4, h.d / 2 - 4), side: chance(0.5) ? -1 : 1, size: h.ruined ? r(2.5, 6) : r(1.2, 2.6) });
+    }
+    // slots along the central aisle, nose to the nearer end gate
+    h.slots = [];
+    for (let lz = -h.d / 2 + 5; lz <= h.d / 2 - 5; lz += 9) {
+      const gate = lz < 0 ? 0 : 1;
+      const [x, z] = localToWorld(h, 0, lz);
+      h.slots.push({ x, z, yaw: h.yaw + (gate === 0 ? 0 : Math.PI), gate, building: h });
+    }
+  }
+  function designGarageBlock(h) {
+    h.wallTex = pickWeighted({ brick: 0.55, silicate: 0.45 });
+    const bays = Math.max(3, Math.floor(h.d / 5));
+    const step = h.d / bays;
+    h.gates = [];
+    h.slots = [];
+    for (let k = 0; k < bays; k++) {
+      const at = -h.d / 2 + step * (k + 0.5);
+      h.gates.push({ face: 'x-', at, w: 4, h: Math.min(4.5, h.h - 0.6), state: h.ruined && chance(0.4) ? 'gone' : pickWeighted(GATE_STATES) });
+      const [x, z] = localToWorld(h, -h.w / 2 + 4.2, at);
+      h.slots.push({ x, z, yaw: h.yaw + Math.PI / 2, gate: k, building: h });
+    }
+    h.windows = [];
+    for (let at = -h.d / 2 + 2.5; at <= h.d / 2 - 2.5; at += 3.5) h.windows.push({ face: 'x+', at, w: 1.8, h: 1.0, sill: h.h - 1.8, broken: chance(h.ruined ? 0.8 : 0.4) });
+    h.holes = [];
+    for (let k = 0, n = h.ruined ? 2 : Math.floor(rand() * 2.2); k < n; k++) h.holes.push({ lz: r(-h.d / 2 + 3, h.d / 2 - 3), side: 0, lx: r(-h.w / 4, h.w / 4), size: h.ruined ? r(2.5, 5) : r(1.2, 2.4) });
+  }
+  // footprint (rotated rectangle) free of roads, water and other houses
+  let allowForest = false; // relaxed after many failed tries (a yard cleared at a forest edge)
+  const footprintFree = (x, z, w, d, yaw) => {
+    if (!inside(x, z, 60)) return false;
+    for (let a = -1; a <= 1; a += 0.5) {
+      for (let b = -1; b <= 1; b += 0.25) {
+        const [px, pz] = localToWorld({ x, z, yaw }, (a * w) / 2 + a * 3, (b * d) / 2 + b * 3);
+        if (roadMask.get(px, pz) || waterMask.get(px, pz) || (!allowForest && isForest(px, pz))) return false;
+        if (houses.some((h) => Math.hypot(h.x - px, h.z - pz) < Math.max(h.w, h.d) / 2 + 3)) return false;
+      }
+    }
+    return true;
+  };
+  const farmYards = [];
+  function addFarmYard(cx, cz, yaw) {
+    const w1 = r(12, 15);
+    const d1 = r(36, 54);
+    const yard = { x: cx, z: cz, yaw };
+    const plan = [{ kind: 'farmShed', lx: 0, lz: 0, w: w1, d: d1, h: r(3.6, 4.2), dyaw: 0 }];
+    if (chance(0.55)) {
+      const w2 = r(12, 15);
+      plan.push({ kind: 'farmShed', lx: w1 / 2 + r(14, 20) + w2 / 2, lz: r(-6, 6), w: w2, d: r(30, 48), h: r(3.6, 4.2), dyaw: 0 });
+    }
+    if (chance(0.85)) {
+      const wg = r(10, 12);
+      plan.push({ kind: 'garageBlock', lx: r(0, 12), lz: -(d1 / 2 + r(16, 22) + wg / 2), w: wg, d: r(20, 30), h: r(5, 6), dyaw: Math.PI / 2 });
+    }
+    const placed = plan.map((b) => {
+      const [x, z] = localToWorld(yard, b.lx, b.lz);
+      return { kind: b.kind, x, z, w: b.w, d: b.d, h: b.h, yaw: yaw + b.dyaw, ruined: chance(o.ruins * 0.8), farm: true, back: [Math.sin(yaw), Math.cos(yaw)] };
+    });
+    if (!placed.every((h) => footprintFree(h.x, h.z, h.w, h.d, h.yaw))) return false;
+    for (const h of placed) {
+      (h.kind === 'farmShed' ? designShed : designGarageBlock)(h);
+      houses.push(h);
+      yardMask.stamp(h.x, h.z, Math.max(h.w, h.d) / 2 + 6, 1);
+    }
+    farmYards.push({ ...yard, buildings: placed });
+    // a field track from the yard to the main road
+    const [sx, sz] = localToWorld(yard, w1 / 2 + 8, 0);
+    let best = null;
+    for (const [px, pz] of mainRoad) if (!best || Math.hypot(px - sx, pz - sz) < Math.hypot(best[0] - sx, best[1] - sz)) best = [px, pz];
+    if (best && Math.hypot(best[0] - sx, best[1] - sz) < 400) {
+      const mid = [(sx + best[0]) / 2 + r(-15, 15), (sz + best[1]) / 2 + r(-15, 15)];
+      const route = [[sx, sz], mid, best];
+      routes[`farm${farmYards.length}`] = route;
+      for (let i = 1; i < route.length; i++) roadMask.stampLine(...route[i - 1], ...route[i], 2.2, 1);
+    }
+    return true;
+  }
+  for (const h of houses) if (h.kind === 'barn') designShed(h);
+  // Near the village (most maps), or for Hide & Seek in a building: close ahead of the launch area
+  for (let k = 0; k < 120 && farmYards.length < (o.farms ?? 1); k++) {
+    let cx;
+    let cz;
+    let yaw;
+    allowForest = k > 60;
+    if (o.farmNearLaunch) {
+      const a = k > 60 ? r(-Math.PI, Math.PI) : r(-1, 1);
+      const dd = k > 60 ? r(110, 320) : r(140, 230);
+      cx = launchRef.x + Math.sin(a) * dd;
+      cz = launchRef.z - Math.cos(a) * dd;
+      yaw = r(0, Math.PI * 2);
+    } else {
+      const i = Math.max(1, Math.min(mainRoad.length - 1, villageS + (chance(0.5) ? 1 : -1) * Math.floor(r(13, 22))));
+      const [x0, z0] = mainRoad[i - 1];
+      const [x1, z1] = mainRoad[i];
+      const len = Math.hypot(x1 - x0, z1 - z0);
+      const side = chance(0.5) ? 1 : -1;
+      const off = r(60, 110);
+      cx = x1 - ((z1 - z0) / len) * off * side;
+      cz = z1 + ((x1 - x0) / len) * off * side;
+      yaw = Math.atan2(-(x1 - x0), -(z1 - z0)) + (chance(0.5) ? 0 : Math.PI / 2);
+    }
+    addFarmYard(cx, cz, yaw);
+  }
 
   // ---------- launch spot ----------
   const launchCandidates = {
@@ -900,19 +1037,59 @@ export function generateLayout(seed, options = {}) {
     return level !== null && heightAt(x, z) < level ? level : null;
   }
 
+  // ---------- distance to the nearest road / track (smooth road edges in colour and grass) ----------
+  // Built on first use, when all routes exist; segments bucketed on a 16 m grid
+  const ROAD_HALF = { 2: 3.4, 1: 1.6 }; // main/cross roads, field tracks
+  let roadIndex = null;
+  function roadDistance(x, z) {
+    if (!roadIndex) {
+      roadIndex = new Map();
+      for (const [name, pts] of Object.entries(routes)) {
+        const kind = name === 'main' || name === 'cross' ? 2 : 1;
+        for (let i = 1; i < pts.length; i++) {
+          const seg = [pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], kind];
+          const pad = ROAD_HALF[kind] + 2;
+          for (let gz = Math.floor((Math.min(seg[1], seg[3]) - pad) / 16); gz <= Math.floor((Math.max(seg[1], seg[3]) + pad) / 16); gz++) {
+            for (let gx = Math.floor((Math.min(seg[0], seg[2]) - pad) / 16); gx <= Math.floor((Math.max(seg[0], seg[2]) + pad) / 16); gx++) {
+              const k = gx * 100003 + gz;
+              if (!roadIndex.has(k)) roadIndex.set(k, []);
+              roadIndex.get(k).push(seg);
+            }
+          }
+        }
+      }
+    }
+    const list = roadIndex.get(Math.floor(x / 16) * 100003 + Math.floor(z / 16));
+    if (!list) return null;
+    let best = null;
+    for (const [x1, z1, x2, z2, kind] of list) {
+      const ex = x2 - x1;
+      const ez = z2 - z1;
+      const t = Math.max(0, Math.min(1, ((x - x1) * ex + (z - z1) * ez) / (ex * ex + ez * ez || 1)));
+      const d = Math.hypot(x - x1 - ex * t, z - z1 - ez * t) - ROAD_HALF[kind]; // < 0: on it
+      if (!best || d < best.d || (d < 0.5 && kind > best.kind)) best = { d, kind };
+    }
+    return best;
+  }
+  // 0..1 how much of a road is here (soft edge ~1.5 m)
+  const roadCover = (x, z) => {
+    const rd = roadDistance(x, z);
+    return rd ? { k: 1 - smoothstep(-0.7, 0.8, rd.d), kind: rd.kind } : { k: 0, kind: 0 };
+  };
+
   // ---------- ground colour ----------
   const [tint, tintK] = SEASON_TINT[season];
   const mix3 = (a, b, k) => [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k, a[2] + (b[2] - a[2]) * k];
   function groundColor(x, z, out) {
-    const road = roadMask.get(x, z);
+    const rc = roadCover(x, z);
+    const road = rc.k > 0.5 ? rc.kind : 0;
     let c;
-    if (road === 2) c = COLORS.road;
-    else if (road === 1) c = COLORS.road;
-    else if (isForest(x, z)) c = COLORS.forestFloor;
+    if (isForest(x, z)) c = COLORS.forestFloor;
     else if (yardMask.get(x, z)) c = COLORS.yard;
     else if (treeMask.get(x, z)) c = COLORS.treeline;
     else c = CROPS[fieldCrop(x, z)];
-    const wv = road ? 0 : wet.get(x, z);
+    if (rc.k > 0) c = mix3(c, COLORS.road, rc.k * (rc.kind === 2 ? 1 : 0.8));
+    const wv = wet.get(x, z) * (1 - rc.k);
     if (wv > 0) {
       const k = Math.min(1, wv * 1.2);
       c = [c[0] + (COLORS.wet[0] - c[0]) * k, c[1] + (COLORS.wet[1] - c[1]) * k, c[2] + (COLORS.wet[2] - c[2]) * k];
@@ -945,13 +1122,11 @@ export function generateLayout(seed, options = {}) {
     if (winter) {
       // snow cover; roads are slush, furrows, forest floor and dug earth show through
       let show = 0.06 + Math.max(0, fbm(x / 30 + 7, z / 30, 2)) * 0.25;
-      if (road === 2) show = 0.7;
-      else if (road === 1) show = 0.4;
-      else if (earthMask.get(x, z)) show = 0.5;
+      if (earthMask.get(x, z)) show = 0.5;
       else if (isForest(x, z)) show = 0.38;
       else if (treeMask.get(x, z)) show = 0.22;
       else if (plowed && stripe < 1) show = 0.55;
-      show = Math.max(show, scorch * 0.55, burn * 0.3);
+      show = Math.max(show, scorch * 0.55, burn * 0.3, rc.k * (rc.kind === 2 ? 0.7 : 0.4));
       const nsnow = 0.95 + fbm(x / 12, z / 12, 2) * 0.08;
       col = mix3([SNOW[0] * nsnow, SNOW[1] * nsnow, SNOW[2] * nsnow], [col[0] * 0.8, col[1] * 0.8, col[2] * 0.8], show);
     }
@@ -961,9 +1136,10 @@ export function generateLayout(seed, options = {}) {
   // ---------- grass: [density 0..1, height m] for the GPU grass ----------
   function grassAt(x, z) {
     if (Math.hypot(x - launch.x, z - launch.z) < launch.clear) return [0.9, 0.1]; // short grass on the pad
-    const road = roadMask.get(x, z);
-    if (road === 2) return [0, 0];
-    if (road === 1) return [0.18, 0.15]; // tufts along a field track
+    // no grass on roads, tufts along field tracks; smooth edges (distance to the road line)
+    const rc = roadCover(x, z);
+    if (rc.kind === 2 && rc.k > 0.5) return [0, 0];
+    if (rc.kind === 1 && rc.k > 0.5) return [0.18, 0.15];
     if (earthMask.get(x, z)) return [0.08, 0.2];
     let d;
     let h;
@@ -987,175 +1163,14 @@ export function generateLayout(seed, options = {}) {
       h *= 0.6;
     } else if (season === 'spring') h *= 0.6;
     else if (season === 'autumn') h *= 0.8;
+    d *= 1 - rc.k * 2; // thinning towards the road edge
     return [Math.min(1, Math.max(0, d)), h];
   }
 
-  // ---------- enemy positions ----------
-  const occupied = houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.w, h.d) / 2 + 1.5 })); // footprints of placed objects
-  const free = (x, z, rad) => inside(x, z, 40) && !waterMask.get(x, z) && !occupied.some((p) => Math.hypot(p.x - x, p.z - z) < p.r + rad);
-  const nearestTreeLinePoint = (x, z) => {
-    let best = null;
-    let bestD = Infinity;
-    for (const t of treeLines) {
-      const ex = t.x2 - t.x1;
-      const ez = t.z2 - t.z1;
-      const len2 = ex * ex + ez * ez;
-      const s = Math.max(0, Math.min(1, ((x - t.x1) * ex + (z - t.z1) * ez) / len2));
-      const px = t.x1 + ex * s;
-      const pz = t.z1 + ez * s;
-      const d = Math.hypot(px - x, pz - z);
-      if (d < bestD) {
-        bestD = d;
-        best = { x: px, z: pz, line: t, yaw: Math.atan2(-ex, -ez), dist: d };
-      }
-    }
-    return best;
-  };
-  const findForestEdge = (x, z) => {
-    for (let rad = 0; rad < 400; rad += 20) {
-      for (let a = 0; a < Math.PI * 2; a += 0.3) {
-        const px = x + Math.cos(a) * rad;
-        const pz = z + Math.sin(a) * rad;
-        if (isForest(px, pz) && !isForest(px + Math.cos(a) * 25, pz + Math.sin(a) * 25)) return { x: px, z: pz, yaw: a };
-      }
-    }
-    return null;
-  };
+  // ---------- footprints of placed objects (houses; the enemy layer adds its own) ----------
+  const occupied = houses.map((h) => ({ x: h.x, z: h.z, r: Math.max(h.w, h.d) / 2 + 1.5 }));
 
-  const sites = [];
-  const kinds = ['treeline', 'village', 'forest', 'field', 'treeline', 'ravine'];
-  const villageHouses = houses.filter((h) => !h.farm && h.kind === 'house');
-  for (let i = 0; i < o.enemySites; i++) {
-    const bearing = r(-0.6, 0.6);
-    const dist = r(o.launchMin, o.launchMax);
-    const sx = launch.x + Math.sin(bearing) * dist;
-    const sz = launch.z - Math.cos(bearing) * dist;
-    let kind = kinds[(i + Math.floor(rand() * kinds.length)) % kinds.length];
-    if (kind === 'village' && sites.some((s) => s.kind === 'village')) kind = 'treeline';
-    let anchor = null;
-    if (kind === 'treeline') {
-      const p = nearestTreeLinePoint(sx, sz);
-      if (p && p.dist < 250) anchor = { x: p.x, z: p.z, yaw: p.yaw, line: p.line };
-    } else if (kind === 'village') {
-      anchor = { x: villageCenter.x, z: villageCenter.z, yaw: 0 };
-    } else if (kind === 'forest') {
-      const p = findForestEdge(sx, sz);
-      if (p && Math.hypot(p.x - sx, p.z - sz) < 300) anchor = p;
-    } else if (kind === 'ravine') {
-      const p = nearestRavinePoint(sx, sz, 250);
-      if (p) anchor = { x: p.x, z: p.z, yaw: p.yaw, ravine: p.ravine };
-    }
-    if (!anchor) {
-      kind = 'field';
-      anchor = { x: sx, z: sz, yaw: r(0, Math.PI * 2) };
-    }
-    if (!inside(anchor.x, anchor.z, 80)) continue;
-    sites.push({ kind, x: anchor.x, z: anchor.z, yaw: anchor.yaw ?? 0, line: anchor.line, ravine: anchor.ravine, items: [] });
-  }
-
-  const parked = []; // { type, x, z, yaw, net, site }
-  for (const site of sites) {
-    const count = Math.max(1, o.vehiclesPerSite + Math.floor(r(-1, 2)));
-    const items = [];
-    for (let k = 0; k < count; k++) items.push(pickWeighted(VEHICLE_WEIGHTS));
-    if (chance(0.75)) items.push('ammo');
-    if (chance(0.3)) items.push('ammo');
-    for (const type of items) {
-      let placed = null;
-      for (let attempt = 0; attempt < 40 && !placed; attempt++) {
-        let x;
-        let z;
-        let yaw;
-        if (site.kind === 'treeline' && site.line) {
-          const t = site.line;
-          const len = Math.hypot(t.x2 - t.x1, t.z2 - t.z1);
-          const s = Math.max(0, Math.min(1, ((site.x - t.x1) * (t.x2 - t.x1) + (site.z - t.z1) * (t.z2 - t.z1)) / (len * len) + r(-60, 60) / len));
-          const side = chance(0.6) ? 1 : -1; // tucked into the tree row
-          const nx = -(t.z2 - t.z1) / len;
-          const nz = (t.x2 - t.x1) / len;
-          const off = side * r(1, 4);
-          x = t.x1 + (t.x2 - t.x1) * s + nx * off;
-          z = t.z1 + (t.z2 - t.z1) * s + nz * off;
-          yaw = site.yaw + (chance(0.5) ? 0 : Math.PI);
-        } else if (site.kind === 'ravine' && site.ravine) {
-          // Along the gully floor, sheltered by its slopes
-          const p = nearestRavinePoint(site.x + r(-60, 60), site.z + r(-60, 60), 120);
-          if (!p) continue;
-          const across = r(-0.15, 0.15) * site.ravine.width;
-          x = p.x + Math.cos(p.yaw) * across;
-          z = p.z - Math.sin(p.yaw) * across;
-          yaw = p.yaw + (chance(0.5) ? 0 : Math.PI);
-        } else if (site.kind === 'village' && villageHouses.length) {
-          const h = villageHouses[Math.floor(rand() * villageHouses.length)];
-          const a = h.yaw + (chance(0.5) ? Math.PI / 2 : -Math.PI / 2);
-          x = h.x - Math.sin(a) * r(8, 12) + r(-4, 4);
-          z = h.z - Math.cos(a) * r(8, 12) + r(-4, 4);
-          yaw = h.yaw + r(-0.3, 0.3);
-          if (roadMask.get(x, z) === 2) continue;
-        } else if (site.kind === 'forest') {
-          x = site.x + r(-35, 35);
-          z = site.z + r(-35, 35);
-          if (!isForest(x, z)) continue;
-          yaw = r(0, Math.PI * 2);
-        } else {
-          x = site.x + r(-45, 45);
-          z = site.z + r(-45, 45);
-          yaw = r(0, Math.PI * 2);
-        }
-        const rad = type === 'ammo' ? 3 : 5;
-        if (!free(x, z, rad)) continue;
-        const net = chance(type === 'ammo' ? Math.min(1, o.camoNets + 0.2) : o.camoNets);
-        placed = { type, x, z, yaw, net, branches: !net && type !== 'ammo' && chance(o.branchCamo), white: winter && chance(o.whitewash), site: sites.indexOf(site) };
-        occupied.push({ x, z, r: rad });
-      }
-      if (placed) {
-        parked.push(placed);
-        site.items.push(placed);
-      }
-    }
-  }
-
-  // Hide & Seek: one parked vehicle in a hideout, 110-220 m from launch, roughly towards the enemy side
-  if (o.hideSeek) {
-    const hs = o.hideSeek;
-    const type = hs.type ?? pickWeighted({ tank: 0.25, ifv: 0.25, apc: 0.2, truck: 0.2, car: 0.1 });
-    // strict first (ahead of the pad, flat, open ground); later attempts relax so a target always exists
-    for (let attempt = 0; attempt < 1200; attempt++) {
-      const stage = Math.floor(attempt / 300); // 0 strict, 1 any bearing, 2 rougher ground, 3 closer/farther + forest ok
-      const bearing = stage === 0 ? r(-1.1, 1.1) : r(-Math.PI, Math.PI);
-      const dist = stage < 3 ? r(o.launchMin, o.launchMax) : r(o.launchMin * 0.6, o.launchMax * 1.4);
-      const x = launch.x + Math.sin(bearing) * dist;
-      const z = launch.z - Math.cos(bearing) * dist;
-      if (!free(x, z, stage < 3 ? 10 : 7) || roadMask.get(x, z) || (stage < 3 && isForest(x, z))) continue;
-      const h0 = heightAt(x, z);
-      const flat = stage < 2 ? 1 : 1.8;
-      if ([[6, 0], [-6, 0], [0, 6], [0, -6]].some(([dx, dz]) => Math.abs(heightAt(x + dx, z + dz) - h0) > flat)) continue;
-      sites.push({ kind: 'hide', x, z, yaw: 0, items: [] });
-      const placed = { type, x, z, yaw: r(0, Math.PI * 2), net: false, branches: false, shelter: { kind: hs.shelter, difficulty: hs.difficulty }, site: sites.length - 1 };
-      parked.push(placed);
-      sites[sites.length - 1].items.push(placed);
-      occupied.push({ x, z, r: 11 });
-      break;
-    }
-  }
-
-  // Burnt-out wrecks along roads in the grey zone (decor, not targets)
-  const wrecks = [];
-  for (let tries = 0; wrecks.length < o.wrecks && tries < 200; tries++) {
-    const route = rand() < 0.6 ? mainRoad : crossRoad;
-    const i = 1 + Math.floor(rand() * (route.length - 2));
-    const [x0, z0] = route[i - 1];
-    const [x1, z1] = route[i];
-    const len = Math.hypot(x1 - x0, z1 - z0);
-    const off = r(5.5, 9) * (chance(0.5) ? 1 : -1); // on the shoulder, not blocking the road
-    const x = x1 - ((z1 - z0) / len) * off;
-    const z = z1 + ((x1 - x0) / len) * off;
-    if (grey(x, z) < 0.3 || !free(x, z, 5)) continue;
-    wrecks.push({ type: pickWeighted(VEHICLE_WEIGHTS), x, z, yaw: Math.atan2(-(x1 - x0), -(z1 - z0)) + r(-0.35, 0.35) + (chance(0.5) ? Math.PI : 0) });
-    occupied.push({ x, z, r: 5 });
-  }
-
-  // ---------- yard fences behind village houses (skipping where vehicles stand) ----------
+  // ---------- yard fences behind village houses ----------
   const fences = []; // { x1, z1, x2, z2 }
   for (const h of houses) {
     if (h.kind !== 'house' || h.farm || !chance(0.7)) continue;
@@ -1181,44 +1196,35 @@ export function generateLayout(seed, options = {}) {
         const cz = z1 + ((z2 - z1) * s1) / len;
         const mx = (ax + cx) / 2;
         const mz = (az + cz) / 2;
-        if (roadMask.get(mx, mz) || occupied.some((p) => p.r < 6 && Math.hypot(p.x - mx, p.z - mz) < p.r + 1.5)) continue;
+        if (roadMask.get(mx, mz)) continue;
         fences.push({ x1: ax, z1: az, x2: cx, z2: cz });
       }
     }
   }
 
-  // ---------- earthworks around parked vehicles: pit + U-shaped berm open at the front ----------
-  for (const p of parked) {
-    if (p.shelter || sites[p.site].kind === 'village' || !chance(o.revetments)) continue;
-    const hx = HALF_WIDTH[p.type] + 1;
-    const hz = HALF_LENGTH[p.type] + 1;
-    const pit = p.type === 'ammo' ? 0.5 : r(0.6, 1.1);
-    const bermH = r(1.3, 2.1);
-    const c = Math.cos(p.yaw);
-    const sn = Math.sin(p.yaw);
-    forVertices(p.x, p.z, Math.max(hx, hz) + 7, (i, dx, dz) => {
-      const lx = dx * c - dz * sn;
-      const lz = dx * sn + dz * c; // nose = -lz
-      const ex = Math.abs(lx) - hx;
-      const ez = Math.abs(lz) - hz;
-      const dOut = Math.hypot(Math.max(ex, 0), Math.max(ez, 0)) + Math.min(Math.max(ex, ez), 0); // signed distance
-      let dh = 0;
-      if (dOut < 1.5) dh -= pit * smoothstep(1.5, -0.5, dOut);
-      const front = lz < -hz + 0.5 && Math.abs(lx) < hx + 1.5; // exit lane
-      const db = Math.abs(dOut - 2.4);
-      if (db < 2 && !front) {
-        const k = Math.cos((db / 2) * Math.PI * 0.5);
-        dh += bermH * k * k;
-      }
-      heights[i] += dh;
+  // ---------- level ground under the long farm buildings (floors are flat) ----------
+  for (const h of houses) {
+    if (h.kind !== 'farmShed' && h.kind !== 'garageBlock' && h.kind !== 'barn') continue;
+    const c = Math.cos(h.yaw);
+    const sn = Math.sin(h.yaw);
+    let sum = 0;
+    let cnt = 0;
+    const R = Math.hypot(h.w, h.d) / 2 + 6;
+    const inRect = (dx, dz, m) => Math.abs(dx * c - dz * sn) < h.w / 2 + m && Math.abs(dx * sn + dz * c) < h.d / 2 + m;
+    forVertices(h.x, h.z, R, (i, dx, dz) => {
+      if (!inRect(dx, dz, 0)) return;
+      sum += heights[i];
+      cnt++;
     });
-    for (let dz = -(hz + 5); dz <= hz + 5; dz += RC) {
-      for (let dx = -(hx + 5); dx <= hx + 5; dx += RC) {
-        const lx = dx * c - dz * sn;
-        const lz = dx * sn + dz * c;
-        if (Math.abs(lx) < hx + 4.5 && Math.abs(lz) < hz + 4.5 && (Math.abs(lx) > hx + 0.5 || Math.abs(lz) > hz + 0.5)) earthMask.stamp(p.x + dx, p.z + dz, 0, 1);
-      }
-    }
+    if (!cnt) continue;
+    const level = sum / cnt;
+    h.floorY = level;
+    forVertices(h.x, h.z, R, (i, dx, dz) => {
+      const ex = Math.max(0, Math.abs(dx * c - dz * sn) - h.w / 2 - 1);
+      const ez = Math.max(0, Math.abs(dx * sn + dz * c) - h.d / 2 - 1);
+      const k = 1 - smoothstep(0, 5, Math.hypot(ex, ez));
+      heights[i] += (level - heights[i]) * k;
+    });
   }
 
   // ---------- launch pad: level ground under the drone ----------
@@ -1234,15 +1240,6 @@ export function generateLayout(seed, options = {}) {
       const k = 1 - smoothstep(4, 9, Math.hypot(dx, dz));
       heights[i] += (padH - heights[i]) * k;
     });
-  }
-
-  // Moving vehicles on roads/tracks, starting near the enemy area
-  const routeLen = (pts) => pts.reduce((sum, [x, z], i) => (i ? sum + Math.hypot(x - pts[i - 1][0], z - pts[i - 1][1]) : 0), 0);
-  const routeNames = Object.keys(routes).filter((k) => k === 'main' || routeLen(routes[k]) > 300); // no ping-pong on short tracks
-  const moving = [];
-  for (let i = 0; i < o.movingVehicles; i++) {
-    const route = routeNames[i === 0 ? 0 : Math.floor(rand() * routeNames.length)];
-    moving.push({ type: pickWeighted({ truck: 0.3, car: 0.25, apc: 0.15, ifv: 0.15, tank: 0.15 }), route, speed: r(4, 9), start: r(0.2, 0.8), dir: chance(0.5) ? 1 : -1, white: winter && chance(o.whitewash) });
   }
 
   // ---------- vegetation ----------
@@ -1335,26 +1332,6 @@ export function generateLayout(seed, options = {}) {
     if (chance(0.25)) addTree(wet.get(x, z) > 0.4 ? 'ravine' : 'lone', x, z);
     else addBush(x, z, r(0.6, 1.4));
   }
-  // Parked under a tree: a big crown right beside most hidden vehicles
-  for (const p of parked) {
-    if (p.shelter || sites[p.site].kind === 'field' || !chance(0.75)) continue;
-    const side = chance(0.5) ? 1 : -1;
-    const off = HALF_WIDTH[p.type] + r(1.4, 2.2);
-    const along = r(-1.5, 1.5);
-    const x = p.x + Math.cos(p.yaw) * off * side - Math.sin(p.yaw) * along;
-    const z = p.z - Math.sin(p.yaw) * off * side - Math.cos(p.yaw) * along;
-    const kind = pickWeighted(TREE_MIX.cover);
-    if (inside(x, z, 10) && !roadMask.get(x, z) && waterAt(x, z) === null) trees.push({ kind, x, z, h: r(TREE_HEIGHT[kind][0] + 1, TREE_HEIGHT[kind][1]) });
-  }
-  // Bushes around enemy positions help hide them
-  for (const p of parked) {
-    if (p.shelter) continue;
-    for (let k = 0; k < 3; k++) {
-      const a = r(0, Math.PI * 2);
-      addBush(p.x + Math.cos(a) * r(5, 8), p.z + Math.sin(a) * r(5, 8), r(0.8, 1.6));
-    }
-  }
-
   // Willows and brush along river banks and lake shores
   for (const rv of rivers) {
     for (let k = 0; k < rv.pts.length; k++) {
@@ -1445,7 +1422,677 @@ export function generateLayout(seed, options = {}) {
     for (let k = 0; k < rv.pts.length; k += 5) if (inside(...rv.pts[k], 40) && !waterMask.get(...rv.pts[k])) coverPoints.push(rv.pts[k]);
   }
 
-  return {
+  // ---------- enemy layer ----------
+  // Enemies are placed last, on top of the finished map, with their own random stream: changing an
+  // enemy setting regenerates only this layer (layout.regenEnemies) and the rest stays the same.
+  // Their earthworks are carved into the ground and undone before the next placement.
+  const baseOptions = o;
+  const baseOccupied = occupied;
+  const carved = new Map(); // height-grid index -> height before the earthworks
+  let carvedBoxes = []; // [x0, z0, x1, z1] areas the current earthworks touched
+
+  // Trunks, bushes, logs and fences the enemy layer must not park on (broad-phase grid)
+  const OBST_CELL = 8;
+  const obstacles = new Map();
+  const addObstacle = (ob, x0, z0, x1, z1) => {
+    for (let iz = Math.floor(z0 / OBST_CELL); iz <= Math.floor(z1 / OBST_CELL); iz++) {
+      for (let ix = Math.floor(x0 / OBST_CELL); ix <= Math.floor(x1 / OBST_CELL); ix++) {
+        const k = ix * 100003 + iz;
+        if (!obstacles.has(k)) obstacles.set(k, []);
+        obstacles.get(k).push(ob);
+      }
+    }
+  };
+  for (const t of trees) addObstacle({ x: t.x, z: t.z, r: 0.25 + t.h * 0.015 }, t.x - 1, t.z - 1, t.x + 1, t.z + 1);
+  for (const b of bushes) addObstacle({ x: b.x, z: b.z, r: b.r * 0.8 }, b.x - b.r, b.z - b.r, b.x + b.r, b.z + b.r);
+  for (const seg of [...fences.map((f) => ({ ...f, r: 0.2 })), ...fallen.map((f) => {
+    const dx = (Math.sin(f.yaw) * f.len) / 2;
+    const dz = (Math.cos(f.yaw) * f.len) / 2;
+    return { x1: f.x - dx, z1: f.z - dz, x2: f.x + dx, z2: f.z + dz, r: f.r + 0.2 };
+  })]) {
+    addObstacle({ seg: true, ...seg }, Math.min(seg.x1, seg.x2) - 1, Math.min(seg.z1, seg.z2) - 1, Math.max(seg.x1, seg.x2) + 1, Math.max(seg.z1, seg.z2) + 1);
+  }
+  // Does a box (half extents hx, hz, rotated by yaw, nose = -z) stand clear of all obstacles?
+  const boxClear = (x, z, yaw, hx, hz) => {
+    const c = Math.cos(yaw);
+    const sn = Math.sin(yaw);
+    const reach = Math.hypot(hx, hz) + 1.5;
+    const seen = new Set();
+    // distance from a point to the box (local frame), minus the obstacle radius
+    const inBox = (px, pz, rad) => {
+      const dx = px - x;
+      const dz = pz - z;
+      const lx = dx * c - dz * sn;
+      const lz = dx * sn + dz * c;
+      return Math.abs(lx) < hx + rad && Math.abs(lz) < hz + rad;
+    };
+    for (let iz = Math.floor((z - reach) / OBST_CELL); iz <= Math.floor((z + reach) / OBST_CELL); iz++) {
+      for (let ix = Math.floor((x - reach) / OBST_CELL); ix <= Math.floor((x + reach) / OBST_CELL); ix++) {
+        for (const ob of obstacles.get(ix * 100003 + iz) ?? []) {
+          if (seen.has(ob)) continue;
+          seen.add(ob);
+          if (!ob.seg) {
+            if (inBox(ob.x, ob.z, ob.r)) return false;
+            continue;
+          }
+          const len = Math.hypot(ob.x2 - ob.x1, ob.z2 - ob.z1);
+          for (let t = 0; t <= len; t += 0.5) {
+            const f = len ? t / len : 0;
+            if (inBox(ob.x1 + (ob.x2 - ob.x1) * f, ob.z1 + (ob.z2 - ob.z1) * f, ob.r)) return false;
+          }
+        }
+      }
+    }
+    return true;
+  };
+
+  function undoEarthworks() {
+    for (const [i, h] of carved) heights[i] = h;
+    carved.clear();
+    earthMask.clear();
+    const boxes = carvedBoxes;
+    carvedBoxes = [];
+    return boxes;
+  }
+
+  // Returns the enemy part of the layout; eo: enemy options on top of the map options
+  function placeEnemies(eo) {
+    const o = { ...baseOptions, ...eo };
+    const rand = mulberry32((seed ^ 0x9e3779b9) >>> 0);
+    const r = (a, b) => a + rand() * (b - a);
+    const chance = (p) => rand() < p;
+    const pickWeighted = (w) => {
+      let t = rand() * Object.values(w).reduce((a, b) => a + b, 0);
+      for (const [k, v] of Object.entries(w)) if ((t -= v) <= 0) return k;
+      return Object.keys(w)[0];
+    };
+    const occupied = baseOccupied.slice();
+    const free = (x, z, rad) => inside(x, z, 40) && !waterMask.get(x, z) && !occupied.some((p) => Math.hypot(p.x - x, p.z - z) < p.r + rad);
+    // a vehicle (or ammo stack) of this type fits here between trunks, bushes, logs and fences
+    const fits = (type, x, z, yaw) => boxClear(x, z, yaw, HALF_WIDTH[type] + 0.3, HALF_LENGTH[type] + 0.4);
+    const setHeight = (i, h) => {
+      if (!carved.has(i)) carved.set(i, heights[i]);
+      heights[i] = h;
+    };
+
+    // Vehicle pit for a dugout: flat floor ~2/3 of the hull height down, ramp up at the back (the
+    // way in and out). The walls, roof and spoil parapet are meshes (shelters.js) that cover the
+    // terrain's slope around it, so the pit reads sharp at any terrain detail.
+    function carveDugout(hd) {
+      const d = dugoutDims(hd.type);
+      const c = Math.cos(hd.yaw);
+      const sn = Math.sin(hd.yaw);
+      const h0 = heightAt(hd.x, hd.z);
+      const floor = h0 - d.depth;
+      const reach = Math.hypot(d.pw, d.pl + d.ramp) + cell * 2;
+      carvedBoxes.push([hd.x - reach, hd.z - reach, hd.x + reach, hd.z + reach]);
+      const pad = cell * 0.5;
+      forVertices(hd.x, hd.z, reach, (i, dx, dz) => {
+        const lx = dx * c - dz * sn;
+        const lz = dx * sn + dz * c;
+        if (Math.abs(lx) > d.pw + pad || lz < -d.pl - pad) return;
+        if (lz <= d.pl) setHeight(i, floor);
+        else if (lz <= d.pl + d.ramp + pad) setHeight(i, Math.min(heights[i], floor + (d.depth * (lz - d.pl)) / d.ramp));
+      });
+      for (let dz = -d.pl - 3; dz <= d.pl + d.ramp; dz += RC / 2) {
+        for (let dx = -d.pw - 3; dx <= d.pw + 3; dx += RC / 2) earthMask.stamp(hd.x + dx * c + dz * sn, hd.z - dx * sn + dz * c, 0, 1);
+      }
+      hd.floor = floor;
+      hd.ground = h0;
+    }
+
+    // Hide & Seek in a building: how it can be entered depends on difficulty (the gate in front of the
+    // vehicle open / half open / closed; hard: one broken window and one small roof hole near it)
+    function openBuilding(slot, difficulty, hide) {
+      const h = slot.building;
+      const gate = h.gates[slot.gate];
+      for (const g of h.gates) if (g !== gate && difficulty !== 'easy') g.state = 'closed';
+      gate.state = { easy: 'open', normal: 'half', hard: 'closed' }[difficulty] ?? 'half';
+      const c = Math.cos(h.yaw);
+      const sn = Math.sin(h.yaw);
+      const dx = slot.x - h.x;
+      const dz = slot.z - h.z;
+      const lx = dx * c - dz * sn;
+      const lz = dx * sn + dz * c;
+      if (difficulty === 'hard') {
+        let best = null;
+        for (const w of h.windows) {
+          w.broken = false;
+          const wz = w.face[0] === 'x' ? w.at : 0;
+          if (!best || Math.abs(wz - lz) < Math.abs((best.face[0] === 'x' ? best.at : 0) - lz)) best = w;
+        }
+        if (best) best.broken = true;
+        h.holes = [{ lz: lz + r(-1.5, 1.5), side: h.kind === 'garageBlock' ? 0 : chance(0.5) ? -1 : 1, lx: lx * 0.5, size: 0.95 }];
+      }
+      // where the tracks reach the building: in front of the gate
+      const out = 4.5;
+      const [gx, gz] = gate.face === 'z-' ? [0, -h.d / 2 - out] : gate.face === 'z+' ? [0, h.d / 2 + out] : gate.face === 'x-' ? [-h.w / 2 - out, gate.at] : [h.w / 2 + out, gate.at];
+      hide.trackFrom = [h.x + gx * c + gz * sn, h.z - gx * sn + gz * c];
+    }
+
+    // Faint vehicle tracks from the nearest road or field track to a hideout's way in: A* on a 2 m
+    // grid around trunks, logs and water, then smoothed. Returns { pts: [[x, z]], gauge } or null.
+    function planTrack(hd) {
+      const back = hd.kind === 'dugout' ? dugoutDims(hd.type).pl + dugoutDims(hd.type).ramp + 2 : HALF_LENGTH[hd.type] + 3;
+      // the vehicle reverses in: tracks start behind it (in front of the gate for a building)
+      const [sx, sz] = hd.trackFrom ?? [hd.x + Math.sin(hd.yaw) * back, hd.z + Math.cos(hd.yaw) * back];
+      let goal = null;
+      let best = 260;
+      for (const pts of Object.values(routes)) {
+        for (const [x, z] of pts) {
+          const dd = Math.hypot(x - sx, z - sz);
+          if (dd < best) {
+            best = dd;
+            goal = [x, z];
+          }
+        }
+      }
+      if (!goal) return null;
+      const G = 2;
+      const x0 = Math.min(sx, goal[0]) - 40;
+      const z0 = Math.min(sz, goal[1]) - 40;
+      const gw = Math.ceil((Math.max(sx, goal[0]) + 40 - x0) / G);
+      const gh = Math.ceil((Math.max(sz, goal[1]) + 40 - z0) / G);
+      const cellOf = (x, z) => Math.floor((z - z0) / G) * gw + Math.floor((x - x0) / G);
+      const blocked = new Uint8Array(gw * gh);
+      for (let j = 0; j < gh; j++) {
+        for (let i = 0; i < gw; i++) {
+          const x = x0 + (i + 0.5) * G;
+          const z = z0 + (j + 0.5) * G;
+          if (waterMask.get(x, z) || !boxClear(x, z, 0, 1.3, 1.3)) blocked[j * gw + i] = 1;
+        }
+      }
+      const start = cellOf(sx, sz);
+      const end = cellOf(goal[0], goal[1]);
+      blocked[start] = 0;
+      blocked[end] = 0;
+      const dist = new Float32Array(gw * gh).fill(Infinity);
+      const came = new Int32Array(gw * gh).fill(-1);
+      const open = [start];
+      dist[start] = 0;
+      const hdist = (k) => Math.hypot((k % gw) - (end % gw), Math.floor(k / gw) - Math.floor(end / gw));
+      let found = false;
+      for (let iter = 0; iter < 40000 && open.length; iter++) {
+        let bi = 0;
+        for (let q = 1; q < open.length; q++) if (dist[open[q]] + hdist(open[q]) * 1.3 < dist[open[bi]] + hdist(open[bi]) * 1.3) bi = q;
+        const k = open[bi];
+        open[bi] = open[open.length - 1];
+        open.pop();
+        if (k === end) {
+          found = true;
+          break;
+        }
+        const ci = k % gw;
+        const cj = Math.floor(k / gw);
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+          const ni = ci + di;
+          const nj = cj + dj;
+          if (ni < 0 || nj < 0 || ni >= gw || nj >= gh) continue;
+          const nk = nj * gw + ni;
+          if (blocked[nk]) continue;
+          const nd = dist[k] + Math.hypot(di, dj);
+          if (nd < dist[nk]) {
+            if (dist[nk] === Infinity) open.push(nk);
+            dist[nk] = nd;
+            came[nk] = k;
+          }
+        }
+      }
+      if (!found) return null;
+      let pts = [];
+      for (let k = end; k >= 0; k = came[k]) pts.push([x0 + ((k % gw) + 0.5) * G, z0 + (Math.floor(k / gw) + 0.5) * G]);
+      pts.reverse();
+      pts[0] = [sx, sz];
+      if (!hd.trackFrom) pts.unshift([hd.x + Math.sin(hd.yaw) * HALF_LENGTH[hd.type] * 0.5, hd.z + Math.cos(hd.yaw) * HALF_LENGTH[hd.type] * 0.5]);
+      for (let pass = 0; pass < 3; pass++) {
+        // Chaikin smoothing
+        const sm = [pts[0]];
+        for (let i = 0; i < pts.length - 1; i++) {
+          const [ax, az] = pts[i];
+          const [bx, bz] = pts[i + 1];
+          sm.push([ax * 0.75 + bx * 0.25, az * 0.75 + bz * 0.25], [ax * 0.25 + bx * 0.75, az * 0.25 + bz * 0.75]);
+        }
+        sm.push(pts[pts.length - 1]);
+        pts = sm;
+      }
+      return { pts, gauge: hd.type === 'tank' || hd.type === 'ifv' ? 2.6 : 2.0, wheels: hd.type !== 'tank' && hd.type !== 'ifv' };
+    }
+
+
+    const nearestTreeLinePoint = (x, z) => {
+      let best = null;
+      let bestD = Infinity;
+      for (const t of treeLines) {
+        const ex = t.x2 - t.x1;
+        const ez = t.z2 - t.z1;
+        const len2 = ex * ex + ez * ez;
+        const s = Math.max(0, Math.min(1, ((x - t.x1) * ex + (z - t.z1) * ez) / len2));
+        const px = t.x1 + ex * s;
+        const pz = t.z1 + ez * s;
+        const d = Math.hypot(px - x, pz - z);
+        if (d < bestD) {
+          bestD = d;
+          best = { x: px, z: pz, line: t, yaw: Math.atan2(-ex, -ez), dist: d };
+        }
+      }
+      return best;
+    };
+    const findForestEdge = (x, z) => {
+      for (let rad = 0; rad < 400; rad += 20) {
+        for (let a = 0; a < Math.PI * 2; a += 0.3) {
+          const px = x + Math.cos(a) * rad;
+          const pz = z + Math.sin(a) * rad;
+          if (isForest(px, pz) && !isForest(px + Math.cos(a) * 25, pz + Math.sin(a) * 25)) return { x: px, z: pz, yaw: a };
+        }
+      }
+      return null;
+    };
+
+    const sites = [];
+    const kinds = ['treeline', 'village', 'forest', 'field', 'treeline', 'ravine', 'farm'];
+    // slots inside farm buildings whose gates are already open (the building doesn't change)
+    const usable = (slot) => ['open', 'half', 'gone'].includes(slot.building.gates[slot.gate].state);
+    const takenSlots = new Set();
+    const villageHouses = houses.filter((h) => !h.farm && h.kind === 'house');
+    for (let i = 0; i < o.enemySites; i++) {
+      const bearing = r(-0.6, 0.6);
+      const dist = r(o.launchMin, o.launchMax);
+      const sx = launch.x + Math.sin(bearing) * dist;
+      const sz = launch.z - Math.cos(bearing) * dist;
+      let kind = kinds[(i + Math.floor(rand() * kinds.length)) % kinds.length];
+      if (kind === 'village' && sites.some((s) => s.kind === 'village')) kind = 'treeline';
+      let anchor = null;
+      if (kind === 'treeline') {
+        const p = nearestTreeLinePoint(sx, sz);
+        if (p && p.dist < 250) anchor = { x: p.x, z: p.z, yaw: p.yaw, line: p.line };
+      } else if (kind === 'village') {
+        anchor = { x: villageCenter.x, z: villageCenter.z, yaw: 0 };
+      } else if (kind === 'forest') {
+        const p = findForestEdge(sx, sz);
+        if (p && Math.hypot(p.x - sx, p.z - sz) < 300) anchor = p;
+      } else if (kind === 'ravine') {
+        const p = nearestRavinePoint(sx, sz, 250);
+        if (p) anchor = { x: p.x, z: p.z, yaw: p.yaw, ravine: p.ravine };
+      } else if (kind === 'farm' && !sites.some((st) => st.kind === 'farm')) {
+        const slots = houses.filter((h) => h.slots).flatMap((h) => h.slots).filter(usable);
+        const near = slots.filter((sl) => Math.hypot(sl.x - sx, sl.z - sz) < 450);
+        if (near.length) anchor = { x: near[0].x, z: near[0].z, yaw: 0, slots: near };
+      }
+      if (!anchor) {
+        kind = 'field';
+        anchor = { x: sx, z: sz, yaw: r(0, Math.PI * 2) };
+      }
+      if (!inside(anchor.x, anchor.z, 80)) continue;
+      sites.push({ kind, x: anchor.x, z: anchor.z, yaw: anchor.yaw ?? 0, line: anchor.line, ravine: anchor.ravine, slots: anchor.slots, items: [] });
+    }
+
+    const parked = []; // { type, x, z, yaw, net, site }
+    for (const site of sites) {
+      const count = Math.max(1, o.vehiclesPerSite + Math.floor(r(-1, 2)));
+      const items = [];
+      for (let k = 0; k < count; k++) items.push(pickWeighted(VEHICLE_WEIGHTS));
+      if (chance(0.75)) items.push('ammo');
+      if (chance(0.3)) items.push('ammo');
+      for (const type of items) {
+        let placed = null;
+        if (site.kind === 'farm') {
+          // parked inside, nose to an open gate: no nets or branches needed
+          const slot = site.slots.find((sl) => !takenSlots.has(sl));
+          if (!slot) break;
+          takenSlots.add(slot);
+          placed = { type, x: slot.x, z: slot.z, yaw: slot.yaw, net: false, branches: false, inside: true, white: winter && chance(o.whitewash), site: sites.indexOf(site) };
+          parked.push(placed);
+          site.items.push(placed);
+          continue;
+        }
+        for (let attempt = 0; attempt < 80 && !placed; attempt++) {
+          let x;
+          let z;
+          let yaw;
+          if (site.kind === 'treeline' && site.line) {
+            const t = site.line;
+            const len = Math.hypot(t.x2 - t.x1, t.z2 - t.z1);
+            const s = Math.max(0, Math.min(1, ((site.x - t.x1) * (t.x2 - t.x1) + (site.z - t.z1) * (t.z2 - t.z1)) / (len * len) + r(-60, 60) / len));
+            const side = chance(0.6) ? 1 : -1; // tucked into the tree row
+            const nx = -(t.z2 - t.z1) / len;
+            const nz = (t.x2 - t.x1) / len;
+            const off = side * r(2.6, 5); // beside the trunk row, under the crowns
+            x = t.x1 + (t.x2 - t.x1) * s + nx * off;
+            z = t.z1 + (t.z2 - t.z1) * s + nz * off;
+            yaw = site.yaw + (chance(0.5) ? 0 : Math.PI);
+          } else if (site.kind === 'ravine' && site.ravine) {
+            // Along the gully floor, sheltered by its slopes
+            const p = nearestRavinePoint(site.x + r(-60, 60), site.z + r(-60, 60), 120);
+            if (!p) continue;
+            const across = r(-0.15, 0.15) * site.ravine.width;
+            x = p.x + Math.cos(p.yaw) * across;
+            z = p.z - Math.sin(p.yaw) * across;
+            yaw = p.yaw + (chance(0.5) ? 0 : Math.PI);
+          } else if (site.kind === 'village' && villageHouses.length) {
+            const h = villageHouses[Math.floor(rand() * villageHouses.length)];
+            const a = h.yaw + (chance(0.5) ? Math.PI / 2 : -Math.PI / 2);
+            x = h.x - Math.sin(a) * r(8, 12) + r(-4, 4);
+            z = h.z - Math.cos(a) * r(8, 12) + r(-4, 4);
+            yaw = h.yaw + r(-0.3, 0.3);
+            if (roadMask.get(x, z) === 2) continue;
+          } else if (site.kind === 'forest') {
+            x = site.x + r(-35, 35);
+            z = site.z + r(-35, 35);
+            if (!isForest(x, z)) continue;
+            yaw = r(0, Math.PI * 2);
+          } else {
+            x = site.x + r(-45, 45);
+            z = site.z + r(-45, 45);
+            yaw = r(0, Math.PI * 2);
+          }
+          const rad = type === 'ammo' ? 3 : 5;
+          if (!free(x, z, rad) || !fits(type, x, z, yaw)) continue;
+          const net = chance(type === 'ammo' ? Math.min(1, o.camoNets + 0.2) : o.camoNets);
+          placed = { type, x, z, yaw, net, branches: !net && type !== 'ammo' && chance(o.branchCamo), white: winter && chance(o.whitewash), site: sites.indexOf(site) };
+          occupied.push({ x, z, r: rad });
+        }
+        if (placed) {
+          parked.push(placed);
+          site.items.push(placed);
+        }
+      }
+    }
+
+    // ---------- Hide & Seek: hideouts where a real crew would hide a vehicle ----------
+    // Beside a tree line under the crowns, a few metres inside a forest edge, behind a village house
+    // or on a ravine floor; never in the open. 1-3 hideouts of the same kind, only one occupied
+    // (recon is part of it); faint tracks lead from the nearest road to each of them.
+    const hideouts = [];
+    const hideTracks = [];
+    // Normal maps: some parked vehicles sit under a draped net or in a dugout instead of a plain
+    // net / branches (where the spot has room for it); their crews stay put
+    if (!o.hideSeek) {
+      for (const p of parked) {
+        if (p.inside || p.type === 'ammo' || !chance(o.hideouts)) continue;
+        const kind = chance(0.55) ? 'net' : 'dugout';
+        if (kind === 'dugout' && !['treeline', 'forest', 'field'].includes(sites[p.site].kind)) continue;
+        const hw = HALF_WIDTH[p.type];
+        const hl = HALF_LENGTH[p.type];
+        const [fx, fz] = kind === 'dugout' ? [hw + 3.2, hl + 3.4] : [hw + 1.2, hl + 1.4];
+        const dd = dugoutDims(p.type);
+        const laneZ = kind === 'dugout' ? dd.pl + (dd.ramp + 4) / 2 : hl + 3.9;
+        const laneHz = kind === 'dugout' ? (dd.ramp + 4) / 2 : 2.5;
+        if (!boxClear(p.x, p.z, p.yaw, fx, fz) || !boxClear(p.x + Math.sin(p.yaw) * laneZ, p.z + Math.cos(p.yaw) * laneZ, p.yaw, hw + 0.5, laneHz)) continue;
+        const h0 = heightAt(p.x, p.z);
+        const c = Math.cos(p.yaw);
+        const sn = Math.sin(p.yaw);
+        if ([[1, 1], [1, -1], [-1, 1], [-1, -1]].some(([u, w]) => Math.abs(heightAt(p.x + u * fx * c + w * fz * sn, p.z - u * fx * sn + w * fz * c) - h0) > 1)) continue;
+        // nobody else parked inside its footprint
+        if (parked.some((q) => q !== p && Math.hypot(q.x - p.x, q.z - p.z) < Math.hypot(fx, fz) + HALF_LENGTH[q.type])) continue;
+        const hide = { kind, difficulty: chance(0.5) ? 'easy' : 'normal', setting: sites[p.site].kind, type: p.type, x: p.x, z: p.z, yaw: p.yaw, occupied: true, seed: Math.floor(rand() * 1e9) };
+        hideouts.push(hide);
+        Object.assign(p, { shelter: hide, net: false, branches: false });
+        if (kind === 'dugout') carveDugout(hide);
+      }
+    }
+    if (o.hideSeek) {
+      const hs = o.hideSeek;
+      const type = hs.type ?? pickWeighted({ tank: 0.25, ifv: 0.25, apc: 0.2, truck: 0.2, car: 0.1 });
+      const count = hs.count ?? { easy: 1, normal: 2, hard: 3 }[hs.difficulty] ?? 2;
+      const hw = HALF_WIDTH[type];
+      const hl = HALF_LENGTH[type];
+      // clear footprint around the vehicle the hideout needs (poles / pit + parapet)
+      const [fx, fz] = hs.shelter === 'dugout' ? [hw + 3.2, hl + 3.4] : [hw + 1.2, hl + 1.4];
+      const dd = dugoutDims(type);
+      const laneZ0 = hs.shelter === 'dugout' ? dd.pl : hl + 1.4;
+      const laneLen = hs.shelter === 'dugout' ? dd.ramp + 4 : 5;
+      const laneHalfW = hs.shelter === 'dugout' ? dd.pw + 0.4 : hw + 0.5;
+      const flatEnough = (x, z, yaw, tol) => {
+        const h0 = heightAt(x, z);
+        const c = Math.cos(yaw);
+        const sn = Math.sin(yaw);
+        return [[1, 1], [1, -1], [-1, 1], [-1, -1], [1, 0], [-1, 0], [0, 1], [0, -1]].every(([u, v]) => {
+          const lx = u * fx;
+          const lz = v * fz;
+          return Math.abs(heightAt(x + lx * c + lz * sn, z - lx * sn + lz * c) - h0) < tol;
+        });
+      };
+      const settings = hs.shelter === 'dugout' ? ['treeline', 'forest'] : ['treeline', 'forest', 'village', 'ravine'];
+      const near = (x, z, lo, hi) => {
+        const d = Math.hypot(x - launch.x, z - launch.z);
+        return d > lo && d < hi;
+      };
+      // footprint (box fx × fz around x, z, yaw) clear of house walls, sampled every metre
+      const clearOfHouses = (x, z, yaw) => {
+        const c = Math.cos(yaw);
+        const sn = Math.sin(yaw);
+        const close = houses.filter((h) => Math.hypot(h.x - x, h.z - z) < Math.max(h.w, h.d) / 2 + Math.hypot(fx, fz) + 1);
+        if (!close.length) return true;
+        for (let lz = -fz; lz <= fz; lz += 1) {
+          for (let lx = -fx; lx <= fx; lx += 1) {
+            const px = x + lx * c + lz * sn;
+            const pz = z - lx * sn + lz * c;
+            for (const h of close) {
+              const hc = Math.cos(h.yaw);
+              const hs2 = Math.sin(h.yaw);
+              const dx = px - h.x;
+              const dz = pz - h.z;
+              if (Math.abs(dx * hc - dz * hs2) < h.w / 2 + 0.6 && Math.abs(dx * hs2 + dz * hc) < h.d / 2 + 0.6) return false;
+            }
+          }
+        }
+        return true;
+      };
+      const collect = (lo, hi) => {
+        const out = [];
+        const ok = (x, z, yaw, setting, tol = 1) => {
+          if (!near(x, z, lo, hi) || !inside(x, z, 60) || roadMask.get(x, z) || waterMask.get(x, z) || !free(x, z, 2)) return;
+          if (!boxClear(x, z, yaw, fx, fz) || !clearOfHouses(x, z, yaw) || !flatEnough(x, z, yaw, tol)) return;
+          // the lane it drove in by (behind it) must be clear of trunks too
+          const lz = laneZ0 + laneLen / 2;
+          if (!boxClear(x + Math.sin(yaw) * lz, z + Math.cos(yaw) * lz, yaw, laneHalfW, laneLen / 2)) return;
+          out.push({ x, z, yaw, setting });
+        };
+        if (settings.includes('treeline')) {
+          for (const t of treeLines) {
+            const len = Math.hypot(t.x2 - t.x1, t.z2 - t.z1);
+            const nx = -(t.z2 - t.z1) / len;
+            const nz = (t.x2 - t.x1) / len;
+            for (let sAt = 8; sAt < len - 8; sAt += 7) {
+              const side = chance(0.5) ? 1 : -1;
+              const off = side * (fx + r(1.2, 2.6)); // trunks just outside the footprint: crowns over it
+              const x = t.x1 + ((t.x2 - t.x1) * sAt) / len + nx * off;
+              const z = t.z1 + ((t.z2 - t.z1) * sAt) / len + nz * off;
+              ok(x, z, Math.atan2(-(t.x2 - t.x1), -(t.z2 - t.z1)) + (chance(0.5) ? 0 : Math.PI), 'treeline');
+            }
+          }
+        }
+        if (settings.includes('forest')) {
+          for (let gz = launch.z - hi; gz < launch.z + hi; gz += 9) {
+            for (let gx = launch.x - hi; gx < launch.x + hi; gx += 9) {
+              if (!isForest(gx, gz)) continue;
+              for (let k = 0; k < 8; k++) {
+                const a = (k / 8) * Math.PI * 2;
+                const ox = Math.sin(a);
+                const oz = -Math.cos(a);
+                if (isForest(gx + ox * 14, gz + oz * 14)) continue; // edge within 14 m in this direction
+                const d = r(4, 9); // this far inside the trees
+                const x = gx - ox * (d - 6);
+                const z = gz - oz * (d - 6);
+                ok(x, z, a + Math.PI, 'forest', 1.2); // nose out towards the field (drive out fast)
+                break;
+              }
+            }
+          }
+        }
+        if (settings.includes('village')) {
+          for (const h of houses) {
+            if (h.kind !== 'house' || h.ruined) continue;
+            const [bx, bz] = h.back;
+            for (const side of [-1, 1]) {
+              const tx = -Math.sin(h.yaw);
+              const tz = -Math.cos(h.yaw);
+              // in the yard behind the house, along its back wall (out of sight from the street)
+              const d = h.d / 2 + fx + r(0.8, 2.5);
+              const x = h.x + bx * d + tx * side * r(0, h.w / 2);
+              const z = h.z + bz * d + tz * side * r(0, h.w / 2);
+              ok(x, z, h.yaw + (chance(0.5) ? 0 : Math.PI), 'village');
+            }
+          }
+        }
+        if (settings.includes('ravine')) {
+          for (const rv of ravines) {
+            for (let i = 2; i < rv.pts.length - 2; i += 3) {
+              const [px, pz] = rv.pts[i];
+              const [qx, qz] = rv.pts[i + 1];
+              ok(px, pz, Math.atan2(-(qx - px), -(qz - pz)), 'ravine', 1.6);
+            }
+          }
+        }
+        return out;
+      };
+      let cands = hs.shelter === 'building' ? [] : collect(o.launchMin, o.launchMax);
+      if (hs.shelter !== 'building' && cands.length < count * 3) cands = cands.concat(collect(o.launchMin * 0.7, o.launchMax * 1.6));
+      if (hs.shelter === 'building') {
+        // a bay or a stretch of aisle inside a farm building, one per building where possible
+        const all = houses.filter((h) => h.slots).flatMap((h) => h.slots);
+        const slots = all.filter((sl) => near(sl.x, sl.z, o.launchMin * 0.6, o.launchMax * 1.8));
+        cands = (slots.length ? slots : all).map((sl) => ({ x: sl.x, z: sl.z, yaw: sl.yaw, setting: 'farm', slot: sl }));
+      }
+      if (globalThis.__hideDebug) globalThis.__hideDebug(cands);
+      // pick spread-out spots: a setting first (so forest edges, which give the most candidates,
+      // don't crowd out the rest), then a spot of that setting
+      const bySetting = {};
+      for (const c of cands) (bySetting[c.setting] ??= []).push(c);
+      const chosen = [];
+      for (let k = 0; k < 400 && chosen.length < count && cands.length; k++) {
+        const weights = Object.fromEntries(Object.keys(bySetting).map((st) => [st, (st === 'ravine' ? 0.6 : 1) / (1 + chosen.filter((q) => q.setting === st).length * 2)]));
+        const list = bySetting[pickWeighted(weights)];
+        const c = list[Math.floor(rand() * list.length)];
+        if (chosen.some((q) => Math.hypot(q.x - c.x, q.z - c.z) < (c.slot ? 12 : 40) || (c.slot && q.slot?.building === c.slot.building && k < 200))) continue;
+        chosen.push(c);
+      }
+      // fallback (tiny or treeless maps): open ground beside the launch area, still a valid hideout
+      for (let k = 0; chosen.length < 1 && hs.shelter !== 'building' && k < 2000; k++) {
+        const a = r(-Math.PI, Math.PI);
+        const d = r(o.launchMin, o.launchMax * 1.5);
+        const x = launch.x + Math.sin(a) * d;
+        const z = launch.z - Math.cos(a) * d;
+        const yaw = r(0, Math.PI * 2);
+        if (inside(x, z, 60) && !roadMask.get(x, z) && !waterMask.get(x, z) && free(x, z, fx) && boxClear(x, z, yaw, fx, fz) && flatEnough(x, z, yaw, 1.8)) chosen.push({ x, z, yaw, setting: 'field' });
+      }
+      const occupiedAt = Math.floor(rand() * chosen.length);
+      chosen.forEach((c, i) => {
+        const hide = { kind: hs.shelter, difficulty: hs.difficulty, setting: c.setting, type, x: c.x, z: c.z, yaw: c.yaw, occupied: i === occupiedAt, seed: Math.floor(rand() * 1e9) };
+        if (c.slot) openBuilding(c.slot, hs.difficulty, hide);
+        hideouts.push(hide);
+        occupied.push({ x: c.x, z: c.z, r: Math.hypot(fx, fz) });
+        sites.push({ kind: 'hide', x: c.x, z: c.z, yaw: c.yaw, items: [] });
+        if (hide.occupied) {
+          const placed = { type, x: c.x, z: c.z, yaw: c.yaw, net: false, branches: false, shelter: hide, site: sites.length - 1 };
+          parked.push(placed);
+          sites[sites.length - 1].items.push(placed);
+        }
+        if (hs.shelter === 'dugout') carveDugout(hide);
+      });
+      for (const hd of hideouts) {
+        const t = planTrack(hd);
+        if (t) hideTracks.push(t);
+      }
+    }
+
+    // Burnt-out wrecks along roads in the grey zone (decor, not targets)
+    const wrecks = [];
+    for (let tries = 0; wrecks.length < o.wrecks && tries < 200; tries++) {
+      const route = rand() < 0.6 ? mainRoad : crossRoad;
+      const i = 1 + Math.floor(rand() * (route.length - 2));
+      const [x0, z0] = route[i - 1];
+      const [x1, z1] = route[i];
+      const len = Math.hypot(x1 - x0, z1 - z0);
+      const off = r(5.5, 9) * (chance(0.5) ? 1 : -1); // on the shoulder, not blocking the road
+      const x = x1 - ((z1 - z0) / len) * off;
+      const z = z1 + ((x1 - x0) / len) * off;
+      const type = pickWeighted(VEHICLE_WEIGHTS);
+      const yaw = Math.atan2(-(x1 - x0), -(z1 - z0)) + r(-0.35, 0.35) + (chance(0.5) ? Math.PI : 0);
+      if (grey(x, z) < 0.3 || !free(x, z, 5) || !fits(type, x, z, yaw)) continue;
+      wrecks.push({ type, x, z, yaw });
+      occupied.push({ x, z, r: 5 });
+    }
+
+
+    // ---------- earthworks around parked vehicles: pit + U-shaped berm open at the front ----------
+    for (const p of parked) {
+      if (p.shelter || p.inside || sites[p.site].kind === 'village' || !chance(o.revetments)) continue;
+      const hx = HALF_WIDTH[p.type] + 1;
+      const hz = HALF_LENGTH[p.type] + 1;
+      const pit = p.type === 'ammo' ? 0.5 : r(0.6, 1.1);
+      const bermH = r(1.3, 2.1);
+      const c = Math.cos(p.yaw);
+      const sn = Math.sin(p.yaw);
+      const reach = Math.max(hx, hz) + 7;
+      carvedBoxes.push([p.x - reach, p.z - reach, p.x + reach, p.z + reach]);
+      forVertices(p.x, p.z, reach, (i, dx, dz) => {
+        const lx = dx * c - dz * sn;
+        const lz = dx * sn + dz * c; // nose = -lz
+        const ex = Math.abs(lx) - hx;
+        const ez = Math.abs(lz) - hz;
+        const dOut = Math.hypot(Math.max(ex, 0), Math.max(ez, 0)) + Math.min(Math.max(ex, ez), 0); // signed distance
+        let dh = 0;
+        if (dOut < 1.5) dh -= pit * smoothstep(1.5, -0.5, dOut);
+        const front = lz < -hz + 0.5 && Math.abs(lx) < hx + 1.5; // exit lane
+        const db = Math.abs(dOut - 2.4);
+        if (db < 2 && !front) {
+          const k = Math.cos((db / 2) * Math.PI * 0.5);
+          dh += bermH * k * k;
+        }
+        if (dh) setHeight(i, heights[i] + dh);
+      });
+      for (let dz = -(hz + 5); dz <= hz + 5; dz += RC) {
+        for (let dx = -(hx + 5); dx <= hx + 5; dx += RC) {
+          const lx = dx * c - dz * sn;
+          const lz = dx * sn + dz * c;
+          if (Math.abs(lx) < hx + 4.5 && Math.abs(lz) < hz + 4.5 && (Math.abs(lx) > hx + 0.5 || Math.abs(lz) > hz + 0.5)) earthMask.stamp(p.x + dx, p.z + dz, 0, 1);
+        }
+      }
+    }
+
+
+    // Moving vehicles on roads/tracks, starting near the enemy area
+    const routeLen = (pts) => pts.reduce((sum, [x, z], i) => (i ? sum + Math.hypot(x - pts[i - 1][0], z - pts[i - 1][1]) : 0), 0);
+    const routeNames = Object.keys(routes).filter((k) => k === 'main' || routeLen(routes[k]) > 300); // no ping-pong on short tracks
+    const moving = [];
+    for (let i = 0; i < o.movingVehicles; i++) {
+      const route = routeNames[i === 0 ? 0 : Math.floor(rand() * routeNames.length)];
+      moving.push({ type: pickWeighted({ truck: 0.3, car: 0.25, apc: 0.15, ifv: 0.15, tank: 0.15 }), route, speed: r(4, 9), start: r(0.2, 0.8), dir: chance(0.5) ? 1 : -1, white: winter && chance(o.whitewash) });
+    }
+
+
+    // Parked under a tree: a big crown right beside most hidden vehicles
+    const coverTrees = [];
+    for (const p of parked) {
+      if (p.shelter || p.inside || sites[p.site].kind === 'field' || !chance(0.75)) continue;
+      const side = chance(0.5) ? 1 : -1;
+      const off = HALF_WIDTH[p.type] + r(1.4, 2.2);
+      const along = r(-1.5, 1.5);
+      const x = p.x + Math.cos(p.yaw) * off * side - Math.sin(p.yaw) * along;
+      const z = p.z - Math.sin(p.yaw) * off * side - Math.cos(p.yaw) * along;
+      const kind = pickWeighted(TREE_MIX.cover);
+      if (inside(x, z, 10) && !roadMask.get(x, z) && waterAt(x, z) === null) coverTrees.push({ kind, x, z, h: r(TREE_HEIGHT[kind][0] + 1, TREE_HEIGHT[kind][1]) });
+    }
+    // Bushes around enemy positions help hide them
+    const coverBushes = [];
+    for (const p of parked) {
+      if (p.shelter || p.inside) continue;
+      for (let k = 0; k < 3; k++) {
+        const a = r(0, Math.PI * 2);
+        const x = p.x + Math.cos(a) * r(5, 8);
+        const z = p.z + Math.sin(a) * r(5, 8);
+        const rad = r(0.8, 1.6);
+        if (!inside(x, z, 10) || blocked(x, z, 0) || parked.some((q) => Math.hypot(q.x - x, q.z - z) < HALF_LENGTH[q.type] + rad)) continue;
+        coverBushes.push({ x, z, r: rad, h: rad * r(0.7, 1.1) });
+      }
+    }
+
+
+    return { sites, parked, wrecks, moving, coverTrees, coverBushes, hideouts, hideTracks };
+  }
+
+  const layout = {
     seed,
     size,
     half,
@@ -1457,11 +2104,8 @@ export function generateLayout(seed, options = {}) {
     grassAt,
     launch,
     enemyCenter,
-    sites,
-    parked,
-    wrecks,
-    moving,
     routes,
+    farmYards,
     houses,
     craters,
     trees,
@@ -1478,5 +2122,14 @@ export function generateLayout(seed, options = {}) {
     waterAt, // water surface where the ground is below it, else null
     burns,
     fallen,
+    // Replace the enemy layer (sites, parked, wrecks, moving, coverTrees, coverBushes) using these
+    // enemy options; returns the areas [x0, z0, x1, z1] whose ground changed (old and new earthworks)
+    regenEnemies(eo) {
+      const dirty = undoEarthworks();
+      Object.assign(layout, placeEnemies(eo));
+      return [...dirty, ...carvedBoxes];
+    },
   };
+  Object.assign(layout, placeEnemies({}));
+  return layout;
 }

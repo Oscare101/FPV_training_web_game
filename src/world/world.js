@@ -3,7 +3,8 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { createTerrainLod } from './terrain.js';
 import { createSky } from './sky.js';
 import { buildVegetation, createVegetationMaterials } from './vegetation.js';
-import { buildStructures } from './structures.js';
+import { buildStructures, buildShelters } from './structures.js';
+import { buildRoads } from './roads.js';
 import { createVehicles } from './vehicles.js';
 import { createEffects } from './effects.js';
 import { createGrass } from './grass.js';
@@ -206,9 +207,15 @@ export function createWorld(container) {
   let vehicles = null;
   let terrain = null;
   let vegetation = null;
+  let roads = null;
   let grass = null;
   let dynamicGroup = null;
   let outer = null;
+  // Enemy layer (vehicles, their cover trees and bushes, hideouts): rebuilt alone when enemy settings change
+  let enemyChunks = null;
+  let enemyVegetation = null;
+  let vegDetailName = 'medium';
+  const ENEMY_TAG = 'enemy';
   const effects = createEffects(scene, (x, z) => (layout ? layout.heightAt(x, z) : 0));
   const droneModel = createDroneModel();
   const droneMesh = droneModel.group;
@@ -262,14 +269,36 @@ export function createWorld(container) {
 
   function clear() {
     if (!layout) return;
-    scene.remove(chunks.root, dynamicGroup, outer, grass.mesh, water.mesh);
+    clearEnemies();
+    scene.remove(chunks.root, outer, grass.mesh, water.mesh);
     water.dispose();
     disposeTree(chunks.root, shared);
     disposeTree(outer);
-    vehicles.dispose();
     vegetation.dispose();
     grass.dispose();
     effects.reset();
+  }
+
+  function buildEnemies() {
+    enemyChunks = createChunks(layout.size, CHUNK_SIZE);
+    colliders.tag = ENEMY_TAG;
+    buildShelters(layout, enemyChunks, colliders, structureMaterial);
+    enemyVegetation = buildVegetation({ ...layout, trees: layout.coverTrees, bushes: layout.coverBushes }, enemyChunks, colliders, vegetationMaterials, vegDetailName);
+    colliders.tag = null;
+    setShadowFlags(enemyChunks.root);
+    scene.add(enemyChunks.root);
+    dynamicGroup = new THREE.Group();
+    vehicles = createVehicles(dynamicGroup, layout, colliders, effects);
+    dynamicGroup.visible = vehiclesOn;
+    scene.add(dynamicGroup);
+  }
+
+  function clearEnemies() {
+    scene.remove(enemyChunks.root, dynamicGroup);
+    disposeTree(enemyChunks.root, shared);
+    enemyVegetation.dispose();
+    vehicles.dispose();
+    colliders.removeTag(ENEMY_TAG);
   }
 
   return {
@@ -306,6 +335,7 @@ export function createWorld(container) {
     build(newLayout, { vegDetail = 'medium' } = {}) {
       clear();
       layout = newLayout;
+      vegDetailName = vegDetail;
       // Face the enemy from the launch point
       const l = layout.launch;
       l.yaw = Math.atan2(-(layout.enemyCenter.x - l.x), -(layout.enemyCenter.z - l.z));
@@ -315,14 +345,12 @@ export function createWorld(container) {
       terrain = createTerrainLod(layout, chunks, terrainMaterial);
       terrain.prime(l.x, l.z, detailDistance);
       buildStructures(layout, chunks, colliders, structureMaterial);
+      roads = buildRoads(layout, chunks);
       vegetation = buildVegetation(layout, chunks, colliders, vegetationMaterials, vegDetail);
       setShadowFlags(chunks.root);
       scene.add(chunks.root);
 
-      dynamicGroup = new THREE.Group();
-      vehicles = createVehicles(dynamicGroup, layout, colliders, effects);
-      dynamicGroup.visible = vehiclesOn;
-      scene.add(dynamicGroup);
+      buildEnemies();
 
       water = createWater(layout);
       scene.add(water.mesh);
@@ -343,6 +371,18 @@ export function createWorld(container) {
       }
       outer = createOuterGround(layout.size, layout.size * 4, edgeCol.multiplyScalar(1 / 64));
       scene.add(outer);
+      if (graphics) this.applyGraphics();
+    },
+
+    // New enemy layer on the same map (enemy settings changed): only the vehicles, their cover and
+    // earthworks change; the ground under old and new earthworks is rebuilt in place
+    rebuildEnemies(enemyOptions) {
+      clearEnemies();
+      effects.reset();
+      const dirty = layout.regenEnemies(enemyOptions);
+      terrain.invalidate(dirty);
+      grass.refresh(dirty);
+      buildEnemies();
       if (graphics) this.applyGraphics();
     },
 
@@ -524,6 +564,7 @@ export function createWorld(container) {
     render(dt = 0) {
       sky.follow(camera, dt);
       chunks.update(camera, Math.min(renderDistance, sky.state.viewDistance + 30)); // nothing past the fog
+      enemyChunks.update(camera, Math.min(renderDistance, sky.state.viewDistance + 30));
       if (dt > 0) camVel.subVectors(camera.position, prevCam).divideScalar(dt);
       if (camVel.lengthSq() > 1e4) camVel.set(0, 0, 0); // camera jumped
       prevCam.copy(camera.position);
@@ -531,6 +572,8 @@ export function createWorld(container) {
       water.update(dt, sky.colors);
       terrain.update(camera, detailDistance);
       vegetation.update(camera, detailDistance);
+      roads.update(camera, detailDistance);
+      enemyVegetation.update(camera, detailDistance);
       grass.update(camera, dt, flightState.wind, flightState.wash);
       fx.render(scene, camera, dt);
     },

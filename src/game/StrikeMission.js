@@ -252,6 +252,7 @@ export class StrikeMission {
   resultView() {
     const r = this.result;
     const [title, cls] = OUTCOME[r.outcome];
+    const done = r.outcome === 'destroyed' || r.outcome === 'immobilized';
     const subject = r.difficulty === 'easy' ? 'TARGET' : r.focus ? r.focus.label.toUpperCase() : 'ENEMY';
     const lines = [];
     if (r.outcome === 'wrong' && !r.struck) {
@@ -274,7 +275,10 @@ export class StrikeMission {
       title: r.outcome === 'miss' || r.outcome === 'wrong' ? title : `${subject} ${title}`,
       cls,
       lines,
-      actions: [['retry', 'Retry (Enter)', true], ['next', 'Next mission'], ['menu', 'Main menu']],
+      // the next mission unlocks once the target is out of the fight (destroyed, or a mobility kill)
+      actions: done
+        ? [['next', 'Next mission (Enter)', true], ['retry', 'Retry'], ['menu', 'Main menu']]
+        : [['retry', 'Retry (Enter)', true], ['next', 'Next mission', false, 'Destroy or immobilize the target first'], ['menu', 'Main menu']],
     };
   }
 }
