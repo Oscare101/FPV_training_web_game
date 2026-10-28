@@ -36,6 +36,7 @@ export class MainMenu {
         <div class="mm-logo"><span class="mm-logo-a">FPV</span><span class="mm-logo-b">FRONTLINE</span><small>drone flight trainer</small></div>
         <div class="mm-top-actions">
           <button data-action="controller" class="mm-chip"><span class="mm-dot"></span><span class="mm-pad">Controller</span></button>
+          <button data-action="stats" class="mm-chip">▤ Stats</button>
           <button data-action="guide" class="mm-chip">◈ Target guide</button>
           <button data-action="settings" class="mm-chip">⚙ Settings</button>
         </div>
@@ -80,6 +81,7 @@ export class MainMenu {
     else if (act === 'settings') this.hooks.onSettings();
     else if (act === 'controller') this.hooks.onController();
     else if (act === 'guide') this.hooks.onGuide();
+    else if (act === 'stats') this.hooks.onStats();
     else if (act === 'free-setup') this.hooks.onFreeSetup();
     else if (act === 'conditions') this.hooks.onConditions();
     else if (act === 'new-field') s.set('hunt.seed', 1 + Math.floor(Math.random() * 99999));

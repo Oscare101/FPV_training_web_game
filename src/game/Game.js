@@ -10,8 +10,8 @@ import { SHELTERS } from '../world/shelters.js';
 export const MODE_NAMES = { free: 'Free Flight', strike: 'Strike Missions', hunt: 'Hunt', hide: 'Hide & Seek' };
 // Settings pages per context: free play can change anything; missions/hunt only what doesn't
 // change the game (map, weather, drone and enemies are set before starting)
-export const GLOBAL_PAGES = ['drone', 'rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
-export const LOCKED_PAGES = ['rates', 'camera', 'hud', 'graphics', 'guide', 'audio', 'controller', 'general'];
+export const GLOBAL_PAGES = ['drone', 'rates', 'camera', 'hud', 'graphics', 'guide', 'stats', 'audio', 'controller', 'general'];
+export const LOCKED_PAGES = ['rates', 'camera', 'hud', 'graphics', 'guide', 'stats', 'audio', 'controller', 'general'];
 export const FREE_SETUP_PAGES = ['free'];
 export const CONDITION_PAGES = ['weather', 'map']; // "Custom conditions"
 
@@ -47,8 +47,8 @@ export class LiveSettings {
 // active mode's map, weather and rules on top (saved settings are never changed by a mode).
 export class Game {
   // live: LiveSettings; ui: { loading(text|null), status(text) }
-  constructor({ settings, live, world, flight, audio, hud, ui }) {
-    Object.assign(this, { settings, live, world, flight, audio, hud, ui });
+  constructor({ settings, live, world, flight, audio, hud, ui, stats }) {
+    Object.assign(this, { settings, live, world, flight, audio, hud, ui, stats });
     this.state = 'menu'; // 'menu' | 'playing'
     this.paused = false;
     this.builtKey = '';
@@ -66,6 +66,9 @@ export class Game {
     }, true);
     const fx = createStrikeFx(world, audio);
     this.fx = fx;
+    fx.onDetonate = (hit, out, transitions) => this.playing && stats?.detonation(this.mode, hit, out, transitions);
+    fx.onCookoff = (transitions) => this.playing && stats?.cookoff(this.mode, transitions);
+    this.lastResult = null;
     const ctx = { flight, world, settings, fx, hud };
     this.modes = { free: new FreeFlight(ctx), strike: new StrikeMission(ctx), hunt: new Hunt(ctx), hide: new HideSeek(ctx) };
 
@@ -275,9 +278,20 @@ export class Game {
     if (!this.playing || this.paused) return;
     this.fx.update(dt);
     this.active.update(dt);
+    this.recordRound();
     const threat = this.flight.status === 'armed' || this.flight.status === 'disarmed' ? this.flight.drone : null;
     const rules = this.active.enemyRules;
     this.world.update(dt, threat, rules.reaction, rules.alertness);
+  }
+
+  // A round just ended (strike result, hunt / hide & seek over): count it for the statistics
+  recordRound() {
+    const a = this.active;
+    const r = this.mode === 'strike' ? a.result : a.over;
+    if (!r || r === this.lastResult) return;
+    this.lastResult = r;
+    const won = this.mode === 'strike' ? ['destroyed', 'immobilized'].includes(r.outcome) : this.mode === 'hunt' ? r.reason === 'cleared' || r.kills > 0 : true;
+    this.stats?.round(this.mode, won);
   }
 
   // Menu background: vehicles keep driving, nobody reacts

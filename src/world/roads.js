@@ -68,6 +68,9 @@ export function buildRoads(layout, chunks) {
       const a = rows[i];
       const b = rows[i + 1];
       const [mx, , mz] = a[0].p;
+      const [cx, , cz] = a[Math.floor(profile.length / 2)].p;
+      const water = layout.waterAt?.(cx, cz) ?? null;
+      if (water !== null && water - heightAt(cx, cz) > 0.3) continue; // not under deep water (fords are shallow)
       const bucket = buckets[chunks.indexOf(mx, mz)];
       for (let j = 0; j < profile.length - 1; j++) {
         if (a[j].c[3] === 0 && a[j + 1].c[3] === 0) continue; // grass between track ruts

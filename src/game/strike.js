@@ -99,10 +99,14 @@ export function createStrikeFx(world, audio) {
     world.effects.explode(pos);
     effectsFor(out.changed);
     audio.playExplosion();
+    api.onDetonate?.(hit, out, out.changed.map((v) => ({ v, from: before.get(v), to: v.state })));
     return out;
   }
 
-  return {
+  // onDetonate(hit, out, transitions) / onCookoff(transitions): for statistics
+  const api = {
+    onDetonate: null,
+    onCookoff: null,
     detonate,
     blastPath,
     update(dt) {
@@ -118,7 +122,9 @@ export function createStrikeFx(world, audio) {
           const before = new Map(world.vehicles.list.map((v) => [v, v.state]));
           world.vehicles.damage(b.vehicle, 'destroyed');
           blast(b.pos, b.vehicle);
-          effectsFor(world.vehicles.list.filter((v) => v.state !== before.get(v)));
+          const changed = world.vehicles.list.filter((v) => v.state !== before.get(v));
+          effectsFor(changed);
+          api.onCookoff?.(changed.map((v) => ({ v, from: before.get(v), to: v.state })));
         }
       }
     },
@@ -126,4 +132,5 @@ export function createStrikeFx(world, audio) {
       pending.length = 0;
     },
   };
+  return api;
 }

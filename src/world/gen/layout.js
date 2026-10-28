@@ -168,6 +168,43 @@ const smoothstep = (e0, e1, x) => {
   return t * t * (3 - 2 * t);
 };
 
+// Distance to the nearest route segment (minus its half width: < 0 on it) and its kind
+// (2 main/cross road, 1 field track); segments bucketed on a 16 m grid
+const ROAD_HALF = { 2: 3.4, 1: 1.6 };
+function routeDistance(routes) {
+  const index = new Map();
+  for (const [name, pts] of Object.entries(routes)) {
+    const kind = name === 'main' || name === 'cross' ? 2 : 1;
+    for (let i = 1; i < pts.length; i++) {
+      const seg = [pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], kind];
+      const pad = ROAD_HALF[kind] + 18;
+      for (let gz = Math.floor((Math.min(seg[1], seg[3]) - pad) / 16); gz <= Math.floor((Math.max(seg[1], seg[3]) + pad) / 16); gz++) {
+        for (let gx = Math.floor((Math.min(seg[0], seg[2]) - pad) / 16); gx <= Math.floor((Math.max(seg[0], seg[2]) + pad) / 16); gx++) {
+          const k = gx * 100003 + gz;
+          if (!index.has(k)) index.set(k, []);
+          index.get(k).push(seg);
+        }
+      }
+    }
+  }
+  return (x, z) => {
+    const list = index.get(Math.floor(x / 16) * 100003 + Math.floor(z / 16));
+    if (!list) return null;
+    let best = null;
+    for (const [x1, z1, x2, z2, kind] of list) {
+      const ex = x2 - x1;
+      const ez = z2 - z1;
+      const t = Math.max(0, Math.min(1, ((x - x1) * ex + (z - z1) * ez) / (ex * ex + ez * ez || 1)));
+      const d = Math.hypot(x - x1 - ex * t, z - z1 - ez * t) - ROAD_HALF[kind];
+      if (!best || d < best.d || (d < 0.5 && kind > best.kind)) {
+        const len = Math.hypot(ex, ez) || 1;
+        best = { d, kind, dx: ex / len, dz: ez / len };
+      }
+    }
+    return best;
+  };
+}
+
 export function generateLayout(seed, options = {}) {
   const o = { ...MAP_DEFAULTS, ...options };
   const rand = mulberry32(seed);
@@ -470,12 +507,14 @@ export function generateLayout(seed, options = {}) {
       const z = r(-half + R + 120, half - R - 120);
       if (Math.hypot(x - launchRef.x, z - launchRef.z) < R + 150 || Math.hypot(x - enemyCenter.x, z - enemyCenter.z) < R + 110) continue;
       if (Math.hypot(x - villageCenter.x, z - villageCenter.z) < R + 90 || lakes.some((l) => Math.hypot(l.x - x, l.z - z) < l.R + R + 60)) continue;
+      const rv = nearestRavinePoint(x, z, R * 1.4 + 80);
+      if (rv && rv.dist < R * 1.4 + rv.ravine.width / 2 + 25) continue; // not inside a ravine (its walls would tower over the shore)
       let wetTaken = false;
       for (let a = 0; a < 16 && !wetTaken; a++) {
         for (const f of [0.3, 0.7, 1.1]) {
           const px = x + Math.cos((a / 16) * Math.PI * 2) * R * f;
           const pz = z + Math.sin((a / 16) * Math.PI * 2) * R * f;
-          if (roadMask.get(px, pz) === 2 || waterMask.get(px, pz)) wetTaken = true;
+          if (roadMask.get(px, pz) || waterMask.get(px, pz)) wetTaken = true; // no road or track through a lake
         }
       }
       if (wetTaken) continue;
@@ -811,19 +850,25 @@ export function generateLayout(seed, options = {}) {
     }
   }
 
-  // Ravines: smooth profile, max-combined; roads cross them on embankments
-  const roadZone = createRaster(size, 2);
-  for (const road of Object.values(routes)) {
-    for (let i = 1; i < road.length; i++) {
-      for (const [rad, level] of [[17, 1], [14, 2], [11, 3], [8, 4], [5, 5]]) roadZone.stampLine(...road[i - 1], ...road[i], rad, level);
-    }
-  }
+  // Ravines: smooth profile, max-combined; roads cross them on embankments that fall away smoothly
+  // (by distance to the road line: a stepped raster here gave boxy terraces)
+  // Only where a road crosses: a track running along a ravine stays down on its floor
+  // (rx, rz: the ravine's direction there; omitted = any angle counts)
+  const nearRoad = routeDistance(routes);
+  const embankment = (x, z, rx, rz) => {
+    const rd = nearRoad(x, z);
+    if (!rd) return 0;
+    const across = rx === undefined ? 1 : smoothstep(0.35, 0.75, Math.abs(rd.dx * rz - rd.dz * rx));
+    return (1 - smoothstep(1, 13, rd.d)) * across;
+  };
   const carve = new Float32Array(stride * stride);
+  const carveDir = new Float32Array(stride * stride * 2); // ravine direction at each carved vertex
   for (const rv of ravines) {
     const hw = rv.width / 2;
     for (let k = 1; k < rv.pts.length; k++) {
       const [x0, z0] = rv.pts[k - 1];
       const [x1, z1] = rv.pts[k];
+      const segLen = Math.hypot(x1 - x0, z1 - z0) || 1;
       for (let t = 0; t < 1; t += 0.5) {
         const px = x0 + (x1 - x0) * t;
         const pz = z0 + (z1 - z0) * t;
@@ -832,7 +877,11 @@ export function generateLayout(seed, options = {}) {
           if (d >= hw) return;
           const c = Math.cos((d / hw) * Math.PI * 0.5);
           const v = rv.depth * c * c;
-          if (v > carve[i]) carve[i] = v;
+          if (v > carve[i]) {
+            carve[i] = v;
+            carveDir[i * 2] = (x1 - x0) / segLen;
+            carveDir[i * 2 + 1] = (z1 - z0) / segLen;
+          }
         });
         for (let dz = -hw; dz <= hw; dz += RC) {
           for (let dx = -hw; dx <= hw; dx += RC) {
@@ -849,7 +898,7 @@ export function generateLayout(seed, options = {}) {
       if (!carve[i]) continue;
       const x = -half + ix * cell;
       const z = -half + iz * cell;
-      heights[i] -= carve[i] * (1 - roadZone.get(x, z) / 5) * edgeFade(x, z);
+      heights[i] -= carve[i] * (1 - embankment(x, z, carveDir[i * 2], carveDir[i * 2 + 1])) * edgeFade(x, z);
     }
   }
 
@@ -867,7 +916,10 @@ export function generateLayout(seed, options = {}) {
     const d = heights[(iz + 1) * stride + ix + 1];
     return a + (b - a) * tx + (c - a) * tz + (a - b - c + d) * tx * tz;
   };
-  const BANK = 14; // m of bank above the waterline, cut down to a gentle slope
+  // Banks above the waterline are cut down to a gentle slope (rise per metre) until it meets the
+  // natural ground (out to BANK m: ravine walls around a lake or river would otherwise end in a cliff)
+  const BANK = 48;
+  const BANK_SLOPE = 0.25;
   for (const rv of rivers) {
     const hw = rv.width / 2;
     const raw = rv.pts.map(([x, z], i) => {
@@ -901,11 +953,11 @@ export function generateLayout(seed, options = {}) {
         const d = Math.hypot(vx - (x0 + ex * t), vz - (z0 + ez * t));
         if (d >= hw + BANK) return;
         const level = rv.levels[i - 1] + (rv.levels[i] - rv.levels[i - 1]) * t;
-        const ford = roadZone.get(vx, vz) / 5; // shallow where a road crosses
+        const ford = embankment(vx, vz); // shallow where a road crosses
         const fade = edgeFade(vx, vz);
         let h;
         if (d < hw) h = level - Math.max(0.25, rv.depth * (1 - ford)) * (1 - (d / hw) ** 2) - 0.05;
-        else h = level + 0.25 + ((d - hw) / BANK) * 3.5;
+        else h = level + 0.25 + (d - hw) * BANK_SLOPE;
         h = heights[vi] + (h - heights[vi]) * fade;
         if (h < target[vi]) target[vi] = h;
         if (d < hw) channel.add(vi);
@@ -944,8 +996,9 @@ export function generateLayout(seed, options = {}) {
         heights[vi] = Math.min(heights[vi], l.level - 0.25 - l.depth * (1 - (d / lr) ** 2) ** 0.7);
       } else if (d < lr + BANK) {
         const dm = d - lr;
-        let h = Math.min(heights[vi], l.level + 0.3 + (dm / BANK) * 3);
-        if (dm < 4) h = Math.max(h, l.level + 0.15);
+        let h = Math.min(heights[vi], l.level + 0.3 + dm * BANK_SLOPE * 0.85);
+        // keep the shore just above the water, then slope (1:2) down to lower ground around it
+        h = Math.max(h, l.level + 0.15 - Math.max(0, dm - 1.5) * 0.5);
         heights[vi] = h;
       }
       if (d < lr + 10) wet.max(vx, vz, d < lr + 3 ? 1 : 0.7);
@@ -1039,38 +1092,8 @@ export function generateLayout(seed, options = {}) {
 
   // ---------- distance to the nearest road / track (smooth road edges in colour and grass) ----------
   // Built on first use, when all routes exist; segments bucketed on a 16 m grid
-  const ROAD_HALF = { 2: 3.4, 1: 1.6 }; // main/cross roads, field tracks
   let roadIndex = null;
-  function roadDistance(x, z) {
-    if (!roadIndex) {
-      roadIndex = new Map();
-      for (const [name, pts] of Object.entries(routes)) {
-        const kind = name === 'main' || name === 'cross' ? 2 : 1;
-        for (let i = 1; i < pts.length; i++) {
-          const seg = [pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1], kind];
-          const pad = ROAD_HALF[kind] + 2;
-          for (let gz = Math.floor((Math.min(seg[1], seg[3]) - pad) / 16); gz <= Math.floor((Math.max(seg[1], seg[3]) + pad) / 16); gz++) {
-            for (let gx = Math.floor((Math.min(seg[0], seg[2]) - pad) / 16); gx <= Math.floor((Math.max(seg[0], seg[2]) + pad) / 16); gx++) {
-              const k = gx * 100003 + gz;
-              if (!roadIndex.has(k)) roadIndex.set(k, []);
-              roadIndex.get(k).push(seg);
-            }
-          }
-        }
-      }
-    }
-    const list = roadIndex.get(Math.floor(x / 16) * 100003 + Math.floor(z / 16));
-    if (!list) return null;
-    let best = null;
-    for (const [x1, z1, x2, z2, kind] of list) {
-      const ex = x2 - x1;
-      const ez = z2 - z1;
-      const t = Math.max(0, Math.min(1, ((x - x1) * ex + (z - z1) * ez) / (ex * ex + ez * ez || 1)));
-      const d = Math.hypot(x - x1 - ex * t, z - z1 - ez * t) - ROAD_HALF[kind]; // < 0: on it
-      if (!best || d < best.d || (d < 0.5 && kind > best.kind)) best = { d, kind };
-    }
-    return best;
-  }
+  const roadDistance = (x, z) => (roadIndex ??= routeDistance(routes))(x, z);
   // 0..1 how much of a road is here (soft edge ~1.5 m)
   const roadCover = (x, z) => {
     const rd = roadDistance(x, z);
@@ -1198,6 +1221,23 @@ export function generateLayout(seed, options = {}) {
         const mz = (az + cz) / 2;
         if (roadMask.get(mx, mz)) continue;
         fences.push({ x1: ax, z1: az, x2: cx, z2: cz });
+      }
+    }
+  }
+
+  // ---------- smoothing: rivers, ravines, embankments and craters are carved with min/max rules on
+  // the grid, which leaves straight creases and steps; two light blur passes round them off.
+  // Water levels stay: the beds only get shallower by a few cm at their edges.
+  {
+    const tmp = new Float32Array(heights.length);
+    for (let pass = 0; pass < 2; pass++) {
+      tmp.set(heights);
+      for (let iz = 1; iz < n; iz++) {
+        for (let ix = 1; ix < n; ix++) {
+          const i = iz * stride + ix;
+          heights[i] = (tmp[i] * 4 + (tmp[i - 1] + tmp[i + 1] + tmp[i - stride] + tmp[i + stride]) * 2
+            + tmp[i - stride - 1] + tmp[i - stride + 1] + tmp[i + stride - 1] + tmp[i + stride + 1]) / 16;
+        }
       }
     }
   }

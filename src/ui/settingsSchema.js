@@ -319,6 +319,10 @@ export const CATEGORIES = [
     groups: [{ title: '', custom: 'guide' }],
   },
   {
+    id: 'stats', label: 'Statistics', icon: '▤', wide: true,
+    groups: [{ title: '', custom: 'stats' }],
+  },
+  {
     id: 'audio', label: 'Audio', icon: '♪',
     groups: [
       {

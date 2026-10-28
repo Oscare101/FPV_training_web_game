@@ -141,6 +141,15 @@ export class SettingsMenu {
       section.className = 'group-plain';
       section.appendChild(this.buildGuide());
     }
+    if (g.custom === 'stats') {
+      section.className = 'group-plain';
+      this.statsEl = h('div', 'stats');
+      section.appendChild(this.statsEl);
+      this.statsEl.addEventListener('click', (e) => {
+        if (e.target.closest('[data-stats-reset]')) this.confirm('Reset all statistics?', 'Time, flights, strikes, kills and records per mode start again from zero.', 'Reset', () => this.hooks.stats.reset());
+      });
+      this.hooks.stats?.onChange(() => this.category === 'stats' && this.renderStats());
+    }
     if (g.custom === 'controller') {
       section.className = 'group-plain';
       const mount = h('div');
@@ -323,6 +332,78 @@ export class SettingsMenu {
 
   // Target guide: per vehicle, direct-hit zone maps (top and side, drawn from the real zone rules),
   // near-miss chances by distance, and tips; general rules first
+  // Vehicle pictures (guide, statistics), rendered once
+  portraits() {
+    this.portraitCache ??= renderVehiclePortraits();
+    return this.portraitCache;
+  }
+
+  renderStats() {
+    const d = this.hooks.stats?.data;
+    if (!d || !this.statsEl) return;
+    const hm = (s) => (s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.floor((s % 3600) / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min` : `${Math.round(s)} s`);
+    const km = (m) => (m >= 1000 ? `${(m / 1000).toFixed(1)} km` : `${Math.round(m)} m`);
+    const pct = (a, b) => (b ? `${Math.round((a / b) * 100)}%` : '–');
+    const tile = (value, label, note = '') => `<div class="stat-tile"><b>${value}</b><span>${label}</span>${note ? `<small>${note}</small>` : ''}</div>`;
+    const totals = Object.values(d.kills).reduce((s, k) => ({ destroyed: s.destroyed + k.destroyed, immobilized: s.immobilized + k.immobilized, damaged: s.damaged + k.damaged }), { destroyed: 0, immobilized: 0, damaged: 0 });
+    const modeName = { free: 'Free Flight', strike: 'Strike Missions', hunt: 'Hunt', hide: 'Hide & Seek' };
+    const zones = Object.entries(d.zones).sort((a, b) => b[1] - a[1]).slice(0, 6);
+    const drones = Object.entries(d.drones).sort((a, b) => b[1].time - a[1].time);
+    const since = new Date(d.since).toLocaleDateString();
+    const vehicleCards = Object.entries(d.kills).map(([type, k]) => `
+      <div class="stat-vehicle${k.destroyed + k.immobilized + k.damaged ? '' : ' none'}">
+        <img data-type="${type}" alt="${GUIDE[type].label}">
+        <div><h4>${GUIDE[type].label}</h4>
+          ${['destroyed', 'immobilized', 'damaged'].map((e) => `<span><i style="background:${EFFECT_COLOR[e]}"></i>${EFFECT_WORD[e]} <b>${k[e]}</b></span>`).join('')}
+        </div>
+      </div>`).join('');
+    this.statsEl.innerHTML = `
+      <p class="stats-since">Since ${since} · saved in this browser</p>
+      <h3>Flying</h3>
+      <div class="stat-tiles">
+        ${tile(hm(d.playTime), 'time in the game')}
+        ${tile(hm(d.flightTime), 'flight time')}
+        ${tile(d.flights, 'flights', `${d.crashes} crashed`)}
+        ${tile(km(d.distance), 'distance flown')}
+        ${tile(`${Math.round(d.topSpeed * 3.6)} km/h`, 'top speed')}
+        ${tile(`${Math.round(d.maxAltitude)} m`, 'highest above ground')}
+      </div>
+      <h3>Strikes</h3>
+      <div class="stat-tiles">
+        ${tile(d.detonations, 'detonations')}
+        ${tile(pct(d.directHits, d.detonations), 'accuracy', `${d.directHits} direct hits on a vehicle`)}
+        ${tile(pct(d.effective, d.detonations), 'effective strikes', 'damaged at least one enemy')}
+        ${tile(totals.destroyed, 'vehicles destroyed', `${totals.immobilized} immobilized · ${totals.damaged} damaged`)}
+        ${tile(totals.destroyed ? (d.detonations / totals.destroyed).toFixed(1) : '–', 'drones per kill')}
+        ${tile(d.netHits, 'charges stopped by a net')}
+      </div>
+      <h3>Vehicles</h3>
+      <div class="stat-vehicles">${vehicleCards}</div>
+      <div class="stats-cols">
+        <div><h3>Where you hit them</h3>
+          ${zones.length ? `<table class="stats-table"><tbody>${zones.map(([k, n]) => { const [type, zone] = k.split('|'); return `<tr><td>${GUIDE[type]?.label ?? type}</td><td>${zone}</td><td class="num">${n}</td></tr>`; }).join('')}</tbody></table>` : '<p class="stats-empty">No direct hits yet.</p>'}
+        </div>
+        <div><h3>Modes</h3>
+          <table class="stats-table"><thead><tr><th></th><th class="num">Time</th><th class="num">Rounds</th><th class="num">Won</th><th class="num">Destroyed</th></tr></thead><tbody>
+          ${Object.entries(d.modes).map(([m, v]) => `<tr><td>${modeName[m]}</td><td class="num">${hm(v.time)}</td><td class="num">${m === 'free' ? '–' : v.rounds}</td><td class="num">${m === 'free' ? '–' : v.wins}</td><td class="num">${v.destroyed}</td></tr>`).join('')}
+          </tbody></table>
+        </div>
+      </div>
+      <div class="stats-cols">
+        <div><h3>Drones</h3>
+          ${drones.length ? `<table class="stats-table"><thead><tr><th></th><th class="num">Flights</th><th class="num">Time</th><th class="num">Distance</th></tr></thead><tbody>${drones.map(([label, v]) => `<tr><td>${label}</td><td class="num">${v.flights}</td><td class="num">${hm(v.time)}</td><td class="num">${km(v.distance)}</td></tr>`).join('')}</tbody></table>` : '<p class="stats-empty">No flights yet.</p>'}
+        </div>
+        <div><h3>Recent</h3>
+          ${d.recent.length ? `<table class="stats-table"><tbody>${d.recent.slice(0, 12).map((r) => `<tr><td>${new Date(r.t).toLocaleDateString(undefined, { day: 'numeric', month: 'short' })}</td><td>${GUIDE[r.type]?.label ?? r.type} <span style="color:${EFFECT_COLOR[r.to]}">${EFFECT_WORD[r.to]}</span></td><td class="muted">${r.how} · ${modeName[r.mode]}</td></tr>`).join('')}</tbody></table>` : '<p class="stats-empty">Nothing hit yet.</p>'}
+        </div>
+      </div>
+      <div class="stats-foot"><button data-stats-reset>Reset statistics</button></div>`;
+    setTimeout(() => {
+      const pics = this.portraits();
+      for (const img of this.statsEl.querySelectorAll('img[data-type]')) img.src = pics[img.dataset.type]?.photo ?? '';
+    }, 30);
+  }
+
   buildGuide() {
     this.guideImages = {};
     const wrap = h('div', 'guide');
@@ -548,18 +629,22 @@ export class SettingsMenu {
       this.navButtons[cat.id].classList.toggle('active', cat.id === id);
     }
     this.content.scrollTop = 0;
+    // pages without settings (guide, statistics) have nothing to reset
+    const hasFields = CATEGORIES.find((c) => c.id === id).groups.some((g) => g.fields || g.custom === 'rates' || g.custom === 'controller' || g.custom === 'quality');
+    for (const b of this.root.querySelectorAll('[data-action="reset-page"], [data-action="reset-all"]')) b.hidden = !hasFields;
     if (id === 'hud') this.refreshOsdBackdrop();
     if (id === 'guide' && !this.portraitsDone) {
       // render the vehicle pictures the first time the guide opens
       this.portraitsDone = true;
       setTimeout(() => {
-        const pics = renderVehiclePortraits();
+        const pics = this.portraits();
         for (const [type, el] of Object.entries(this.guideImages)) {
           if (!pics[type]) continue;
           for (const k of ['photo', 'front', 'rear']) el[k].src = pics[type][k];
         }
       }, 30);
     }
+    if (id === 'stats') this.renderStats();
     this.updateLayout();
   }
 

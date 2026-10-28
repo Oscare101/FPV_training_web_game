@@ -16,8 +16,10 @@ import { generateLayout } from './world/gen/layout.js';
 import { mapKeyOf, enemyKeyOf } from './game/conditions.js';
 import { captureScreenshot, snapshotDataUrl, screenshotToast } from './ui/Screenshot.js';
 import { createStickPreview } from './ui/stickPreview.js';
+import { Stats } from './game/Stats.js';
 
 const settings = new Settings();
+const stats = new Stats();
 const live = new LiveSettings(settings); // settings + the active mode's map/weather/rules
 const world = createWorld(document.getElementById('app'));
 world.applySettings(live.data);
@@ -52,6 +54,7 @@ let game = null;
 const hud = new GameHud(document.body, world, (a) => game.action(a));
 const settingsMenu = new SettingsMenu(settings, document.body, {
   input,
+  stats,
   onNewMap: () => game.newFreeMap(),
   onScreenshot: () => (shotPending = true),
   onClose: () => {
@@ -61,7 +64,7 @@ const settingsMenu = new SettingsMenu(settings, document.body, {
   },
 });
 game = new Game({
-  settings, live, world, flight, audio, hud,
+  settings, live, world, flight, audio, hud, stats,
   ui: {
     loading(text, soft = false) {
       loading.hidden = !text;
@@ -78,6 +81,7 @@ const mainMenu = new MainMenu(settings, document.body, {
   onSettings: () => settingsMenu.open('drone', { allowed: GLOBAL_PAGES, title: 'Settings' }),
   onController: () => settingsMenu.open('controller', { allowed: GLOBAL_PAGES, title: 'Settings' }),
   onGuide: () => settingsMenu.open('guide', { allowed: GLOBAL_PAGES, title: 'Settings' }),
+  onStats: () => settingsMenu.open('stats', { allowed: GLOBAL_PAGES, title: 'Settings' }),
   onFreeSetup: () => {
     game.setMode('free');
     settingsMenu.open('free', { allowed: FREE_SETUP_PAGES, title: 'Free Flight' });
@@ -194,6 +198,7 @@ function frame(now) {
   prevDetonate = detonate;
 
   flight.update(dt, paused); // physics pauses in menus
+  stats.tick(dt, { active: !paused, mode: game.mode, flight, drone: live.data.drone });
   if (!paused) game.update(dt);
   else if (inMenu) game.updateMenu(dt);
 

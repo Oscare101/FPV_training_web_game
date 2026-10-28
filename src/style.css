@@ -391,6 +391,32 @@ button.danger:hover { border-color: #ff8a60; }
 .mission-result button:disabled { opacity: 0.35; cursor: not-allowed; border-color: #3d4a41; }
 .menu.stick-preview .ctl-grid { grid-template-columns: minmax(0, 1fr); }
 
+/* ---------- statistics ---------- */
+.stats { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+.stats h3 { margin: 14px 0 4px; font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--muted); }
+.stats-since { margin: 0; font-size: 12px; color: var(--muted); }
+.stat-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.stat-tile { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line); border-radius: 6px; }
+.stat-tile b { font-size: 22px; font-weight: 700; color: var(--text); font-variant-numeric: tabular-nums; }
+.stat-tile span { font-size: 12px; color: var(--text); }
+.stat-tile small { font-size: 11px; color: var(--muted); }
+.stat-vehicles { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 8px; }
+.stat-vehicle { display: flex; gap: 10px; align-items: center; padding: 6px 10px 6px 6px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--line); border-radius: 6px; }
+.stat-vehicle.none { opacity: 0.55; }
+.stat-vehicle img { width: 112px; height: 68px; object-fit: contain; flex: none; }
+.stat-vehicle h4 { margin: 0 0 4px; font-size: 13px; }
+.stat-vehicle span { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+.stat-vehicle span b { color: var(--text); font-variant-numeric: tabular-nums; }
+.stat-vehicle i { width: 8px; height: 8px; border-radius: 2px; display: inline-block; }
+.stats-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.stats-table th { text-align: left; font-weight: 500; color: var(--muted); padding: 3px 6px; }
+.stats-table td { padding: 4px 6px; border-top: 1px solid var(--line); }
+.stats-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.stats-table .muted { color: var(--muted); }
+.stats-empty { margin: 0; font-size: 12px; color: var(--muted); }
+.stats-foot { margin-top: 14px; }
+
 /* ---------- target guide ---------- */
 .guide { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
 .guide-rules { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
