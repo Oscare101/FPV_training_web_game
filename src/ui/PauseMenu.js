@@ -1,7 +1,9 @@
+import { isFullscreen } from './fullscreen.js';
+
 // In-game pause (Esc): resume, restart, settings, exit. Free Flight can open every setting;
 // missions and Hunt only the ones that don't change the game (exit to change the rest).
 export class PauseMenu {
-  // onAction(action): 'resume' | 'restart' | 'reset-enemies' | 'settings' | 'free-setup' | 'controller' | 'menu'
+  // onAction(action): 'resume' | 'restart' | 'reset-enemies' | 'settings' | 'free-setup' | 'controller' | 'fullscreen' | 'menu'
   constructor(parent, onAction) {
     this.visible = false;
     this.root = document.createElement('div');
@@ -42,6 +44,7 @@ export class PauseMenu {
       ...(free ? [['free-setup', 'Enemies & custom conditions']] : []),
       ['settings', 'Settings'],
       ['controller', 'Controller'],
+      ['fullscreen', isFullscreen() ? 'Exit fullscreen' : 'Fullscreen'],
       ['menu', 'Exit to main menu'],
     ];
     this.buttons.innerHTML = items.map(([a, l, primary]) => `<button data-action="${a}" class="${primary ? 'primary' : ''}">${l}</button>`).join('');

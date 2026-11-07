@@ -1,6 +1,7 @@
 import { DRONE_PRESETS } from '../flight/presets.js';
 import { bestScore } from '../game/Hunt.js';
 import { hideBest } from '../game/HideSeek.js';
+import { toggleFullscreen, onFullscreenChange } from './fullscreen.js';
 
 const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
 const cap = (s) => s[0].toUpperCase() + s.slice(1);
@@ -39,6 +40,7 @@ export class MainMenu {
           <button data-action="stats" class="mm-chip">▤ Stats</button>
           <button data-action="guide" class="mm-chip">◈ Target guide</button>
           <button data-action="settings" class="mm-chip">⚙ Settings</button>
+          <button data-action="fullscreen" class="mm-chip mm-fs" title="Fullscreen (Shift+F)">⛶</button>
         </div>
       </header>
       <section class="mm-panel">
@@ -49,13 +51,19 @@ export class MainMenu {
         <div class="mm-drone"></div>
         <button class="mm-play" data-action="play"><span>PLAY</span><small></small></button>
       </footer>
-      <div class="mm-keys"><kbd>Enter</kbd> play · <kbd>↑</kbd><kbd>↓</kbd> mode · <kbd>Esc</kbd> pause in game · <kbd>K</kbd> screenshot</div>`;
+      <div class="mm-keys"><kbd>Enter</kbd> play · <kbd>↑</kbd><kbd>↓</kbd> mode · <kbd>Esc</kbd> pause in game · <kbd>K</kbd> screenshot · <kbd>Shift</kbd><kbd>F</kbd> fullscreen</div>`;
     parent.appendChild(this.root);
     this.cards = this.root.querySelector('.mm-cards');
     this.droneEl = this.root.querySelector('.mm-drone');
     this.playSub = this.root.querySelector('.mm-play small');
     this.dot = this.root.querySelector('.mm-dot');
     this.padLabel = this.root.querySelector('.mm-pad');
+
+    this.fsBtn = this.root.querySelector('.mm-fs');
+    onFullscreenChange((on) => {
+      this.fsBtn.textContent = on ? '⛶ Exit fullscreen' : '⛶';
+      this.fsBtn.title = on ? 'Exit fullscreen (Shift+F, or hold Esc)' : 'Fullscreen (Shift+F)';
+    });
 
     this.root.addEventListener('click', (e) => this.click(e));
     settings.onChange(() => this.visible && this.render());
@@ -82,6 +90,7 @@ export class MainMenu {
     else if (act === 'controller') this.hooks.onController();
     else if (act === 'guide') this.hooks.onGuide();
     else if (act === 'stats') this.hooks.onStats();
+    else if (act === 'fullscreen') toggleFullscreen();
     else if (act === 'free-setup') this.hooks.onFreeSetup();
     else if (act === 'conditions') this.hooks.onConditions();
     else if (act === 'new-field') s.set('hunt.seed', 1 + Math.floor(Math.random() * 99999));

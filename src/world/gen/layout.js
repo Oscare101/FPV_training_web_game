@@ -1613,15 +1613,26 @@ export function generateLayout(seed, options = {}) {
     // Faint vehicle tracks from the nearest road or field track to a hideout's way in: A* on a 2 m
     // grid around trunks, logs and water, then smoothed. Returns { pts: [[x, z]], gauge } or null.
     function planTrack(hd) {
-      const back = hd.kind === 'dugout' ? dugoutDims(hd.type).pl + dugoutDims(hd.type).ramp + 2 : HALF_LENGTH[hd.type] + 3;
+      const dug = hd.kind === 'dugout' ? dugoutDims(hd.type) : null;
+      // dugouts: from beyond the end of the ramp, clear of the spoil mound (shelters.js reaches 1 m past it)
+      const back = dug ? dug.pl + dug.ramp + 4 : HALF_LENGTH[hd.type] + 3;
       // the vehicle reverses in: tracks start behind it (in front of the gate for a building)
       const [sx, sz] = hd.trackFrom ?? [hd.x + Math.sin(hd.yaw) * back, hd.z + Math.cos(hd.yaw) * back];
+      // a dugout's mound (sides, front, roof) can't be driven over: only the ramp is open
+      const dugouts = hideouts.filter((h) => h.kind === 'dugout').map((h) => ({ h, d: dugoutDims(h.type), c: Math.cos(h.yaw), sn: Math.sin(h.yaw) }));
+      const inMound = (x, z) => dugouts.some(({ h, d, c, sn }) => {
+        const dx = x - h.x;
+        const dz = z - h.z;
+        const lx = dx * c - dz * sn;
+        const lz = dx * sn + dz * c;
+        return Math.abs(lx) < d.pw + 4.6 && lz > -d.pl - 4.4 && lz < d.pl + d.ramp + 2 && !(Math.abs(lx) < d.pw && lz > d.pl);
+      });
       let goal = null;
       let best = 260;
       for (const pts of Object.values(routes)) {
         for (const [x, z] of pts) {
           const dd = Math.hypot(x - sx, z - sz);
-          if (dd < best) {
+          if (dd < best && !inMound(x, z)) {
             best = dd;
             goal = [x, z];
           }
@@ -1639,7 +1650,7 @@ export function generateLayout(seed, options = {}) {
         for (let i = 0; i < gw; i++) {
           const x = x0 + (i + 0.5) * G;
           const z = z0 + (j + 0.5) * G;
-          if (waterMask.get(x, z) || !boxClear(x, z, 0, 1.3, 1.3)) blocked[j * gw + i] = 1;
+          if (waterMask.get(x, z) || !boxClear(x, z, 0, 1.3, 1.3) || inMound(x, z)) blocked[j * gw + i] = 1;
         }
       }
       const start = cellOf(sx, sz);
@@ -1678,12 +1689,16 @@ export function generateLayout(seed, options = {}) {
           }
         }
       }
-      if (!found) return null;
+      // straight out of the pit and up the ramp (or out from under the net) before turning
+      const along = (l) => [hd.x + Math.sin(hd.yaw) * l, hd.z + Math.cos(hd.yaw) * l];
+      if (!found && !dug) return null;
       let pts = [];
-      for (let k = end; k >= 0; k = came[k]) pts.push([x0 + ((k % gw) + 0.5) * G, z0 + (Math.floor(k / gw) + 0.5) * G]);
+      for (let k = end; found && k >= 0; k = came[k]) pts.push([x0 + ((k % gw) + 0.5) * G, z0 + (Math.floor(k / gw) + 0.5) * G]);
       pts.reverse();
+      if (!found) pts = [[sx, sz], along(back + 10)]; // no way through (dense forest): marks out of the ramp only
       pts[0] = [sx, sz];
-      if (!hd.trackFrom) pts.unshift([hd.x + Math.sin(hd.yaw) * HALF_LENGTH[hd.type] * 0.5, hd.z + Math.cos(hd.yaw) * HALF_LENGTH[hd.type] * 0.5]);
+      if (dug) pts.unshift(along(dug.pl + dug.ramp + 1));
+      if (!hd.trackFrom) pts.unshift(along(HALF_LENGTH[hd.type] * 0.5));
       for (let pass = 0; pass < 3; pass++) {
         // Chaikin smoothing
         const sm = [pts[0]];

@@ -17,6 +17,7 @@ import { mapKeyOf, enemyKeyOf } from './game/conditions.js';
 import { captureScreenshot, snapshotDataUrl, screenshotToast } from './ui/Screenshot.js';
 import { createStickPreview } from './ui/stickPreview.js';
 import { Stats } from './game/Stats.js';
+import { toggleFullscreen } from './ui/fullscreen.js';
 
 const settings = new Settings();
 const stats = new Stats();
@@ -106,6 +107,9 @@ const pauseMenu = new PauseMenu(document.body, (a) => {
   if (a === 'free-setup') settingsMenu.open('free', { allowed: null, title: 'Settings' });
   if (a === 'controller') settingsMenu.open('controller', { allowed: game.locked ? LOCKED_PAGES : null, title: 'Settings' });
   if (a === 'menu') game.exitToMenu();
+  if (a === 'fullscreen') {
+    toggleFullscreen().then(pauseMenuShow); // stay paused, label updated
+  }
 });
 function pauseMenuShow() {
   game.pause();
@@ -131,7 +135,10 @@ window.addEventListener('keydown', (e) => {
   }
   if (isFormTarget(e)) return;
   if (e.code === 'KeyK') shotPending = true;
-  if (e.code === 'KeyF') fps.toggle();
+  if (e.code === 'KeyF') {
+    if (e.shiftKey) toggleFullscreen();
+    else fps.toggle();
+  }
   if (e.code === 'KeyM') settings.set('audio.muted', !settings.data.audio.muted);
   if (e.code === 'KeyC') {
     if (settingsMenu.visible && settingsMenu.category === 'controller') settingsMenu.hide();

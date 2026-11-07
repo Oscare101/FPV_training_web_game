@@ -329,7 +329,7 @@ export function buildTrackGeometry(track, heightAt) {
   samples.push(pts[pts.length - 1]);
   const n = samples.length;
   if (n < 2) return new THREE.BufferGeometry();
-  const fade = (k) => Math.max(0, Math.min(1, k / 12, (n - 1 - k) / 4)); // in from the road, out at the hideout
+  const fade = (k) => Math.max(0, Math.min(1, (k + 1) / 3, (n - 1 - k) / 12)); // pts run hideout -> road: clear at the hideout, fading out towards the road
   const rows = samples.map(([x, z], k) => {
     const [px, pz] = samples[Math.max(0, k - 2)];
     const [qx, qz] = samples[Math.min(n - 1, k + 2)];
